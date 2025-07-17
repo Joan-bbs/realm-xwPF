@@ -72,7 +72,7 @@ Create any directory and place the script and compressed package files there. Wh
 
 - **📊 Visual Interface** - Clean numeric selection menu, no need to memorize complex commands
 - **📋 Export Configuration Files** - View current configuration, copy and paste to create .json file for export
-- **📒 Import Configuration Files** - Select configuration file to import, automatically recognize JSON configuration files in the same directory for import
+- **📒 Import Configuration Files** - Automatically recognize JSON configuration files in the same directory for import, or input complete file path for recognition and import
 - **⏰ Scheduled Tasks** - Support for scheduled restarts, responding to DDNS domain update resolution
 - **🔧 Intelligent Detection** - Automatic detection of system architecture, dependency tools, port conflicts
 
