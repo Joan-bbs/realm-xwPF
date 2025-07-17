@@ -1203,7 +1203,7 @@ import_json_to_rules() {
     # 提取endpoints信息（支持负载均衡）
     local temp_file=$(mktemp)
 
-    # 使用Python提取完整的endpoints信息（增强版）
+    # 使用Python提取完整的endpoints信息（增强）
     local python_cmd=""
     if command -v python3 >/dev/null 2>&1; then
         python_cmd="python3"
@@ -1229,6 +1229,7 @@ try:
             balance = endpoint.get('balance', '')
             listen_transport = endpoint.get('listen_transport', '')
             remote_transport = endpoint.get('remote_transport', '')
+            through = endpoint.get('through', '')
 
             if listen and remote:
                 # 判断服务器角色
@@ -1260,14 +1261,15 @@ try:
                 if not weights_str:
                     weights_str = ','.join(['1'] * len(targets))
 
-                # 输出格式：listen|remote|target_list|balance|role|listen_transport|remote_transport|weights
-                print('{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}'.format(
-                    listen, remote, target_list, balance, role, listen_transport, remote_transport, weights_str))
+                # 输出格式：监听地址|远程地址|目标列表|负载均衡|角色|监听传输|远程传输|权重|出口地址
+                # 输出格式：listen|remote|target_list|balance|role|listen_transport|remote_transport|weights|through
+                print('{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}'.format(
+                    listen, remote, target_list, balance, role, listen_transport, remote_transport, weights_str, through))
 except Exception as e:
     sys.exit(1)
 " > "$temp_file"
     else
-        # 回退到简化方法（增强版）
+        # 回退到简化方法（增强）
         awk '
             BEGIN {
                 in_endpoint = 0; transport_buffer = ""
@@ -1398,11 +1400,11 @@ except Exception as e:
                     }
                 }
 
-                # 输出格式：listen|remote|extra_info|balance|role|listen_transport|remote_transport|weights
-                print listen "|" remote "|" extra_info "|" balance "|" role "|" listen_transport "|" remote_transport "|" weights_str
+                # 输出格式：监听地址|远程地址|扩展信息|负载均衡|角色|监听传输|远程传输|权重|出口地址
+                print listen "|" remote "|" extra_info "|" balance "|" role "|" listen_transport "|" remote_transport "|" weights_str "|" through
 
                 # 重置变量
-                listen = ""; remote = ""; has_extra = 0; balance = ""; role = ""
+                listen = ""; remote = ""; through = ""; has_extra = 0; balance = ""; role = ""
                 listen_transport = ""; remote_transport = ""; extra_count = 0
                 collecting_extra = 0; in_endpoint = 0
             }
@@ -1418,8 +1420,8 @@ except Exception as e:
     local rule_count=0
     local rule_id=1
 
-    # 逐行处理endpoints（增强版）
-    while IFS='|' read -r listen_addr remote_addr target_list balance_config rule_role listen_transport remote_transport weights_str; do
+    # 逐行处理endpoints（增强）
+    while IFS='|' read -r listen_addr remote_addr target_list balance_config rule_role listen_transport remote_transport weights_str through_addr; do
         [ -z "$listen_addr" ] || [ -z "$remote_addr" ] && continue
 
         # 解析监听地址和端口
@@ -1554,7 +1556,7 @@ PROTOCOL_TYPE="tcp_udp"
 SECURITY_LEVEL="$security_level"
 LISTEN_PORT="$listen_port"
 LISTEN_IP="$listen_ip"
-THROUGH_IP="${through:-::}"
+THROUGH_IP="${through_addr:-::}"
 REMOTE_HOST="$remote_host"
 REMOTE_PORT="$remote_port"
 TLS_SERVER_NAME="$tls_server_name"
@@ -3154,7 +3156,7 @@ configure_exit_server() {
     echo -e "${YELLOW}ipv4输入127.0.0.1,IPv6输入: ::1${NC}"
     echo ""
 
-    # 转发目标地址配置（简化版）
+    # 转发目标地址配置（简化）
     while true; do
         read -p "转发目标IP地址(默认:127.0.0.1): " input_target
         if [ -z "$input_target" ]; then
@@ -3441,7 +3443,7 @@ get_temp_dir() {
     echo "."
 }
 
-# 系统诊断函数 - 虚拟化适配版
+# 系统诊断函数 - 虚拟化适配
 diagnose_system() {
     echo -e "${YELLOW}=== 系统诊断信息 ===${NC}"
 
@@ -3754,7 +3756,7 @@ reliable_download() {
     return 1
 }
 
-# 安装 realm - 虚拟化适配版
+# 安装 realm - 虚拟化适配
 install_realm() {
     echo -e "${GREEN}正在检查 realm 安装状态...${NC}"
 
@@ -4665,7 +4667,7 @@ EOF
     fi
 }
 
-# 生成 systemd 服务文件 - 简化版（内置日志管理）
+# 生成 systemd 服务文件 - 简化（内置日志管理）
 generate_systemd_service() {
     echo -e "${YELLOW}正在生成 systemd 服务文件...${NC}"
 
