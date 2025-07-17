@@ -1637,34 +1637,88 @@ import_config_file() {
         echo -e "${YELLOW}未在脚本工作目录下找到 .json 配置文件${NC}"
         echo -e "${BLUE}脚本工作目录: $script_dir${NC}"
         echo ""
-        read -p "按回车键返回..."
-        return
+        echo -e "${GREEN}请输入配置文件的完整路径:${NC}"
+        read -p "文件路径: " user_file_path
+        echo ""
+
+        # 验证用户输入的文件路径
+        if [ -z "$user_file_path" ]; then
+            echo -e "${BLUE}已取消操作${NC}"
+            read -p "按回车键返回..."
+            return
+        fi
+
+        if [ ! -f "$user_file_path" ]; then
+            echo -e "${RED}文件不存在: $user_file_path${NC}"
+            read -p "按回车键返回..."
+            return
+        fi
+
+        if [[ ! "$user_file_path" =~ \.json$ ]]; then
+            echo -e "${RED}文件必须是 .json 格式${NC}"
+            read -p "按回车键返回..."
+            return
+        fi
+
+        # 使用用户输入的文件
+        local selected_file="$user_file_path"
+        local filename=$(basename "$selected_file")
+        echo -e "${BLUE}选择的文件: $filename${NC}"
+        echo ""
+    else
+        # 显示找到的文件
+        echo -e "${GREEN}找到以下配置文件:${NC}"
+        for i in "${!json_files[@]}"; do
+            local filename=$(basename "${json_files[$i]}")
+            echo -e "${GREEN}$((i+1)).${NC} $filename"
+        done
+        echo ""
+
+        # 用户选择文件
+        echo -e "${BLUE}请选择文件编号 [1-${#json_files[@]}] 或输入配置文件的完整路径(如/zywe/*.json):${NC}"
+        read -p "选择: " file_choice
+        echo ""
+
+        local selected_file=""
+        local filename=""
+
+        # 检查是否是数字编号
+        if echo "$file_choice" | grep -qE "^[0-9]+$"; then
+            # 数字编号选择
+            if [ "$file_choice" -lt 1 ] || [ "$file_choice" -gt ${#json_files[@]} ]; then
+                echo -e "${RED}无效编号${NC}"
+                read -p "按回车键返回..."
+                return
+            fi
+            selected_file="${json_files[$((file_choice-1))]}"
+            filename=$(basename "$selected_file")
+        else
+            # 文件路径输入
+            if [ -z "$file_choice" ]; then
+                echo -e "${BLUE}已取消操作${NC}"
+                read -p "按回车键返回..."
+                return
+            fi
+
+            if [ ! -f "$file_choice" ]; then
+                echo -e "${RED}文件不存在: $file_choice${NC}"
+                read -p "按回车键返回..."
+                return
+            fi
+
+            if [[ ! "$file_choice" =~ \.json$ ]]; then
+                echo -e "${RED}文件必须是 .json 格式${NC}"
+                read -p "按回车键返回..."
+                return
+            fi
+
+            selected_file="$file_choice"
+            filename=$(basename "$selected_file")
+        fi
+
+        echo -e "${BLUE}选择的文件: $filename${NC}"
+        echo ""
     fi
-
-    # 显示找到的文件
-    echo -e "${GREEN}找到以下配置文件:${NC}"
-    for i in "${!json_files[@]}"; do
-        local filename=$(basename "${json_files[$i]}")
-        echo -e "${GREEN}$((i+1)).${NC} $filename"
-    done
-    echo ""
-
-    # 用户选择文件
-    read -p "请选择要导入的文件编号 [1-${#json_files[@]}]: " file_choice
-    echo ""
-
-    # 验证选择
-    if ! echo "$file_choice" | grep -qE "^[0-9]+$" || [ "$file_choice" -lt 1 ] || [ "$file_choice" -gt ${#json_files[@]} ]; then
-        echo -e "${RED}无效选择${NC}"
-        read -p "按回车键返回..."
-        return
-    fi
-
-    local selected_file="${json_files[$((file_choice-1))]}"
-    local filename=$(basename "$selected_file")
-
-    echo -e "${BLUE}选择的文件: $filename${NC}"
-    echo ""
 
     # 快速格式检查
     echo -e "${YELLOW}正在检查配置文件格式...${NC}"
