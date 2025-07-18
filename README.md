@@ -1,12 +1,12 @@
-# xwPF realm 全功能一键脚本，助你快速部署和配置 realm，满足网络转发需求
+# xwPF realm 全功能一键中转脚本,快速上手搭建网络转发
 
 [中文](README.md) | [English](README_EN.md)
 
 ---
 
-> 🚀 **Realm 端口转发智能管理脚本** - 集成原生 realm 最新版全部功能 + 轻量化实现故障转移，保持极简本质,数字化操作界面一键指令操作,提高效率
+> 🚀 **Realm 端口转发管理脚本** - 集成原生 realm 最新版全部功能 + 轻量化实现故障转移，保持极简本质,数字化操作界面一键指令操作,提高效率
 
-## 📸 界面预览
+## 📸 脚本界面预览
 
 <details>
 <summary>点击查看界面截图</summary>
@@ -64,26 +64,23 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 
 ## ✨ 核心特性
 
-- **🚀 一键安装** - 单条命令快速上手，支持网络受限环境下**离线安装**
+- **🚀 离线安装** - 支持网络受限环境下使用
 - **🔄 故障转移** - 使用系统工具,完成自动故障检测,保持轻量化
 - **⚖️ 负载均衡** - 支持轮询、IP哈希等策略，可配置权重分配
-- **🕳️ 搭建隧道** - 双端realm架构支持 TLS，ws 加密传输搭建正向隧道
-- **✅ 支持多种虚拟化** - 自动检测和适配
+- **🕳️ 搭建隧道** - 双端realm架构支持 TLS，ws 加密传输,搭建隧道
 
-- **📊 可视化界面** - 简洁的数字选择菜单，无需记忆复杂命令
 - **📋 导出配置文件** - 查看当前配置,复制粘贴成.json文件导出
 - **📒 导入配置文件** - 自动识别同目录 JSON 配置文件导入,或输入文件完整路径识别导入
 - **⏰ 定时任务** - 支持定时重启、响应ddns域名更新解析
-- **🔧 智能检测** - 自动检测系统架构、依赖工具、端口冲突
+- **🔧 智能检测** - 自动检测系统架构、端口冲突,连接可用性
 
-- **🔍 连通性测试** - 自动测试配置的连接可用性
 - **📝 智能日志管理** - 自动限制日志大小，防止磁盘占用过大
 - **🗑️ 完整卸载** - 分阶段全面清理，“轻轻的我走了，正如我轻轻的来”
 - **⚡ 原生Realm全功能** - 支持最新版realm的所有原生功能
 - tcp/udp协议
 - 单中转多出口
 - 多中转单出口
-- 指定中转机的某个入口 IP,以及某个出口 IP,适用于多IP情况和一入多出情况
+- 指定中转机的某个入口 IP,以及指定某个出口 IP,适用于多IP情况和一入口多出口和多入口一出口的情况
 - 更多玩法参考[zhboner/realm](https://github.com/zhboner/realm)
 
 ## 🗺️ 示意图理解不同场景下工作原理(推荐)
@@ -91,7 +88,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 <details>
 <summary><strong>单端realm架构只负责转发（常见）</strong></summary>
 
-中转机安装realm,出口机安装业务软件
+中转机安装realm,落地机安装业务软件
 
 中转机realm只负责原模原样把设置的监听IP：端口收到的数据包进行转发到出口机,加密解密由业务软件负责
 
@@ -104,7 +101,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 <details>
 <summary><strong>双端realm架构搭建隧道</strong></summary>
 
-中转机安装realm,出口机要安装realm和业务软件
+中转机安装realm,落地机要安装realm和业务软件
 
 在realm和realm之间多套一层realm支持的加密传输
 
@@ -117,7 +114,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 <details>
 <summary><strong>负载均衡+故障转移</strong></summary>
 
-- 同一端口转发有多个出口机
+- 同一端口转发有多个落地机
 ![a9f7c94e9995022557964011d35c3ad4.png](https://i.mji.rip/2025/07/15/a9f7c94e9995022557964011d35c3ad4.png)
 
 - 前置>多中转>单落地
@@ -125,11 +122,11 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 
 - `轮询`模式 (roundrobin)
 
-不断切换规则组里的出口机
+不断切换规则组里的落地机
 
 - `IP哈希`模式 (iphash)
 
-基于源 IP 的哈希值，决定流量走向，保证同一 IP 的请求始终落到同一出口机
+基于源 IP 的哈希值，决定流量走向，保证同一 IP 的请求始终落到同一落地机
 
 - 权重即分配概率
 
@@ -162,7 +159,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 7. 如有状态变化，创建更新标记文件
 ```
 
-客户端可使用指令`while ($true) { (Invoke-WebRequest -Uri 'http://ifconfig.me/ip' -UseBasicParsing).Content; Start-Sleep -Seconds 1 }` 或 `while true; do curl -s ifconfig.me; echo; sleep 1; done` 实时监听IP变化情况
+客户端可使用指令`while ($true) { (Invoke-WebRequest -Uri 'http://ifconfig.me/ip' -UseBasicParsing).Content; Start-Sleep -Seconds 1 }` 或 `while true; do curl -s ifconfig.me; echo; sleep 1; done` 实时监听IP变化情况,确定模式生效
 
 </details>
 
@@ -179,7 +176,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 
 分成了两段代理链,所以又称为分段代理,二级代理（有机会再细讲配置）
 
-**各有各的优点**看使用场景 | 注意有的机不允许安装代理(遵循当地法律法规) | 不过某些场景链式会很灵活
+**各有各的优点**看使用场景 | 注意有的机不允许安装代理 | 不过某些场景链式会很灵活
 
 | 链式代理 (Chained Proxy) | 端口转发 (Port Forwarding) |
 | :------------------- | :--------------------- |

@@ -1,12 +1,12 @@
-# xwPF realm: A full-featured one-click script for quickly deploying and configuring realm to meet network relay needs.
+# xwPF realm: A full-featured one-click relay script for quick setup of network forwarding
 
 [中文](README.md) | [English](README_EN.md)
 
 ---
 
-> 🚀 **Realm Port Forwarding Intelligent Management Script** – Integrates all native features of the latest Realm version + lightweight failover implementation, maintains minimalist essence, digitized operation interface with one-click commands for improved efficiency
+> 🚀 **Realm Port Forwarding Management Script** – Integrates all native features of the latest Realm version + lightweight failover implementation, maintains minimalist essence, digitized operation interface with one-click commands for improved efficiency
 
-## 📸 Interface Preview
+## 📸 Script Interface Preview
 
 <details>
 <summary>Click to view interface screenshots</summary>
@@ -64,26 +64,23 @@ Create any directory and place the script and compressed package files there. Wh
 
 ## ✨ Core Features
 
-- **🚀 One-Click Installation** - Single command for quick setup, supports **offline installation** for network-restricted environments
+- **🚀 Offline Installation** - Supports use in network-restricted environments
 - **🔄 Failover** - Uses system tools to achieve automatic failure detection while maintaining lightweight design
 - **⚖️ Load Balancing** - Supports round-robin, IP hash strategies with configurable weight distribution
-- **🕳️ Tunnel Building** - Dual-realm architecture supports TLS, ws encrypted transmission for forward tunnel construction
-- **✅ Multiple Virtualization Support** - Automatic detection and adaptation
+- **🕳️ Tunnel Building** - Dual-realm architecture supports TLS, ws encrypted transmission for tunnel construction
 
-- **📊 Visual Interface** - Clean numeric selection menu, no need to memorize complex commands
 - **📋 Export Configuration Files** - View current configuration, copy and paste to create .json file for export
 - **📒 Import Configuration Files** - Automatically recognize JSON configuration files in the same directory for import, or input complete file path for recognition and import
 - **⏰ Scheduled Tasks** - Support for scheduled restarts, responding to DDNS domain update resolution
-- **🔧 Intelligent Detection** - Automatic detection of system architecture, dependency tools, port conflicts
+- **🔧 Intelligent Detection** - Automatic detection of system architecture, port conflicts, connection availability
 
-- **🔍 Connectivity Testing** - Automatic testing of configured connection availability
 - **📝 Intelligent Log Management** - Automatic log size limitation to prevent excessive disk usage
 - **🗑️ Complete Uninstallation** - Phased comprehensive cleanup, "I leave gently, just as I came gently"
 - **⚡ Full Native Realm Functionality** - Supports all native features of the latest realm version
 - tcp/udp protocols
 - Single relay to multiple exits
 - Multiple relays to single exit
-- Specify a specific entry IP and exit IP for the relay server, suitable for multi-IP situations and one-to-many scenarios
+- Specify a specific entry IP for the relay server and a specific exit IP, suitable for multi-IP situations and one-entry-multiple-exits and multiple-entries-one-exit scenarios
 - More usage patterns refer to [zhboner/realm](https://github.com/zhboner/realm)
 
 ## 🗺️ Diagrams to Understand Working Principles in Different Scenarios (Recommended)
@@ -125,17 +122,17 @@ An additional layer of realm-supported encrypted transmission is added between r
 
 - `Round Robin` mode (roundrobin)
 
-Continuously switches between exit servers in the rule group.
+Continuously switches between exit servers in the rule group
 
 - `IP Hash` mode (iphash)
 
-Based on the hash value of the source IP, determines traffic direction, ensuring requests from the same IP always go to the same exit server.
+Based on the hash value of the source IP, determines traffic direction, ensuring requests from the same IP always go to the same exit server
 
 - Weight represents allocation probability
 
 - Failover
 
-When a certain exit is detected as failed, it's temporarily removed from the load balancing list. It will be automatically added back to the load balancing list after recovery.
+When a certain exit is detected as failed, it's temporarily removed from the load balancing list. It will be automatically added back to the load balancing list after recovery
 
 Native realm does not currently support failover.
 
