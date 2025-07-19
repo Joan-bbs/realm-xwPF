@@ -3756,14 +3756,6 @@ install_realm_from_local_package() {
     fi
 }
 
-# 快速GitHub连通性测试
-test_github_connectivity() {
-    if curl -s --connect-timeout 2 --max-time 3 "https://github.com" >/dev/null 2>&1; then
-        return 0  # 连通
-    else
-        return 1  # 不连通
-    fi
-}
 
 # 多源下载策略
 download_with_fallback() {
@@ -3776,14 +3768,6 @@ download_with_fallback() {
         "https://demo.52013120.xyz/"
         "https://ghfast.top/"
     )
-
-    # 如果GitHub不连通，跳过官方源
-    if ! test_github_connectivity; then
-        echo -e "${YELLOW}⚠ GitHub官方源连接超时，使用加速源${NC}" >&2
-        sources=("${sources[@]:1}")
-    else
-        echo -e "${GREEN}✓ GitHub官方源连通正常${NC}" >&2
-    fi
 
     # 依次尝试各个源
     for proxy in "${sources[@]}"; do
@@ -4863,14 +4847,10 @@ self_install() {
         # 使用多源下载脚本
         local sources=(
             ""  # 官方源
-            "https://demo.52013120.xyz/"
             "https://proxy.vvvv.ee/"
+            "https://demo.52013120.xyz/"
+            "https://ghfast.top/"
         )
-
-        # 如果GitHub不连通，跳过官方源
-        if ! test_github_connectivity; then
-            sources=("${sources[@]:1}")
-        fi
 
         local download_success=false
         for proxy in "${sources[@]}"; do
