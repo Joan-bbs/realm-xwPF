@@ -4,9 +4,9 @@
 
 ---
 
-> 🚀 **Realm Port Forwarding Management Script** – Integrates all native features of the latest Realm version + lightweight failover implementation, maintains minimalist essence, digitized operation interface with one-click commands for improved efficiency
+> 🛜 **Realm Port Forwarding Management Script** – Integrates all native features of the latest Realm version + lightweight failover implementation, maintains minimalist essence, digitized operation interface with one-click commands for improved efficiency
 
-## 📸 Script Interface Preview
+## 📸 Script Interface Preview 📸
 
 <details>
 <summary>Click to view interface screenshots</summary>
@@ -25,7 +25,7 @@
 
 </details>
 
-## 🚀 Quick Start (For Network-Restricted Environments, See Below)
+## 🚀 Quick Start
 
 ### One-Click Installation
 
@@ -39,12 +39,23 @@ curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | su
 wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
-## 🧭 Offline Installation (Network-Restricted Environments)
+### Network-Restricted Environments Use Accelerated Source, One-Click Installation
+
+**Method 1: Using curl with accelerated download**
+```bash
+curl -fsSL https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+```
+**Method 2: Using wget with accelerated download**
+```bash
+wget -qO- https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+```
+
+## 🧭 Completely Offline Installation
 
 <details>
 <summary>Click to expand offline installation methods</summary>
 
-Suitable for server environments that cannot directly access GitHub: (only ipv6, etc.)
+Suitable for environments that cannot connect to the network at all
 
 **Download Required Files**
 
@@ -64,7 +75,7 @@ Create any directory and place the script and compressed package files there. Wh
 
 ## ✨ Core Features
 
-- **🚀 Offline Installation** - Supports use in network-restricted environments
+- **🚀 Quick Experience** - One-click installation for quick hands-on experience with the joy of network forwarding
 - **🔄 Failover** - Uses system tools to achieve automatic failure detection while maintaining lightweight design
 - **⚖️ Load Balancing** - Supports round-robin, IP hash strategies with configurable weight distribution
 - **🕳️ Tunnel Building** - Dual-realm architecture supports TLS, ws encrypted transmission for tunnel construction
@@ -243,6 +254,7 @@ File organization structure after installation:
 
 - [zhboner/realm](https://github.com/zhboner/realm) - Providing the core Realm program
 - All users who provided feedback and suggestions for the project
+- "https://demo.52013120.xyz/" "https://proxy.vvvv.ee/" - Providing public accelerated sources
 
 ---
 

@@ -13,7 +13,6 @@ FORWARD_PORT=""
 FORWARD_TARGET=""  #支持多地址和域名
 
 # 配置变量
-PROTOCOL_TYPE=""   # 协议类型：tcp_only, udp_only, tcp_udp
 SECURITY_LEVEL=""  # 传输模式：standard, tls_self, tls_ca
 TLS_CERT_PATH=""   # TLS证书路径
 TLS_KEY_PATH=""    # TLS私钥路径
@@ -27,7 +26,6 @@ CRON_DIR="${CONFIG_DIR}/cron"
 CRON_TASKS_FILE="${CRON_DIR}/tasks.conf"
 RULE_ID=""
 RULE_NAME=""
-PROTOCOL_TYPE=""
 SECURITY_LEVEL=""
 TLS_CERT_PATH=""
 TLS_KEY_PATH=""
@@ -199,7 +197,6 @@ FORWARD_IP=$FORWARD_IP
 FORWARD_PORT=$FORWARD_PORT
 
 # 新增配置选项
-PROTOCOL_TYPE=$PROTOCOL_TYPE
 SECURITY_LEVEL=$SECURITY_LEVEL
 TLS_CERT_PATH=$TLS_CERT_PATH
 TLS_KEY_PATH=$TLS_KEY_PATH
@@ -994,7 +991,6 @@ interactive_add_rule() {
     local ORIG_REMOTE_PORT="$REMOTE_PORT"
     local ORIG_EXIT_LISTEN_PORT="$EXIT_LISTEN_PORT"
     local ORIG_FORWARD_TARGET="$FORWARD_TARGET"
-    local ORIG_PROTOCOL_TYPE="$PROTOCOL_TYPE"
     local ORIG_SECURITY_LEVEL="$SECURITY_LEVEL"
     local ORIG_TLS_SERVER_NAME="$TLS_SERVER_NAME"
     local ORIG_TLS_CERT_PATH="$TLS_CERT_PATH"
@@ -1031,7 +1027,6 @@ interactive_add_rule() {
 RULE_ID=$rule_id
 RULE_NAME="中转"
 RULE_ROLE="1"
-PROTOCOL_TYPE="$PROTOCOL_TYPE"
 SECURITY_LEVEL="$SECURITY_LEVEL"
 LISTEN_PORT="$NAT_LISTEN_PORT"
 LISTEN_IP="$(get_nat_server_listen_ip)"
@@ -1067,7 +1062,6 @@ EOF
 RULE_ID=$rule_id
 RULE_NAME="落地"
 RULE_ROLE="2"
-PROTOCOL_TYPE="$PROTOCOL_TYPE"
 SECURITY_LEVEL="$SECURITY_LEVEL"
 LISTEN_PORT="$EXIT_LISTEN_PORT"
 FORWARD_TARGET="$FORWARD_TARGET"
@@ -1102,7 +1096,6 @@ EOF
     REMOTE_PORT="$ORIG_REMOTE_PORT"
     EXIT_LISTEN_PORT="$ORIG_EXIT_LISTEN_PORT"
     FORWARD_TARGET="$ORIG_FORWARD_TARGET"
-    PROTOCOL_TYPE="$ORIG_PROTOCOL_TYPE"
     SECURITY_LEVEL="$ORIG_SECURITY_LEVEL"
     TLS_SERVER_NAME="$ORIG_TLS_SERVER_NAME"
     TLS_CERT_PATH="$ORIG_TLS_CERT_PATH"
@@ -1552,7 +1545,6 @@ except Exception as e:
 RULE_ID=$rule_id
 RULE_NAME="$rule_name"
 RULE_ROLE="$rule_role"
-PROTOCOL_TYPE="tcp_udp"
 SECURITY_LEVEL="$security_level"
 LISTEN_PORT="$listen_port"
 LISTEN_IP="$listen_ip"
@@ -2912,7 +2904,6 @@ configure_nat_server() {
                     # 找到同端口的中转服务器规则，使用其配置
                     NAT_LISTEN_IP="${LISTEN_IP}"
                     NAT_THROUGH_IP="${THROUGH_IP:-::}"
-                    PROTOCOL_TYPE="${PROTOCOL_TYPE}"
                     SECURITY_LEVEL="${SECURITY_LEVEL}"
                     TLS_SERVER_NAME="${TLS_SERVER_NAME}"
                     TLS_CERT_PATH="${TLS_CERT_PATH}"
@@ -3033,13 +3024,10 @@ configure_nat_server() {
         # 跳过协议和传输配置，直接进入规则创建
         echo -e "${BLUE}使用默认配置完成设置${NC}"
     else
-        # 使用默认最佳配置
-        PROTOCOL_TYPE="tcp_udp"
-
     # 传输模式选择
     echo ""
     echo "请选择传输模式:"
-    echo -e "${GREEN}[1]${NC} 默认传输 (透明转发，理论最快)"
+    echo -e "${GREEN}[1]${NC} 默认传输 (不加密，理论最快)"
     echo -e "${GREEN}[2]${NC} TLS (自签证书，自动生成)"
     echo -e "${GREEN}[3]${NC} TLS (CA签发证书)"
     echo -e "${GREEN}[4]${NC} TLS+WebSocket (自签证书，伪装HTTPS流量)"
@@ -3298,13 +3286,10 @@ configure_exit_server() {
     # 设置兼容性变量（用于旧代码）
     FORWARD_IP=$(echo "${TARGET_ADDRESSES[0]}" | xargs)
 
-    # 使用默认最佳配置
-    PROTOCOL_TYPE="tcp_udp"
-
     # 传输模式选择
     echo ""
     echo "请选择传输模式:"
-    echo -e "${GREEN}[1]${NC} 默认传输 (透明转发，理论最快)"
+    echo -e "${GREEN}[1]${NC} 默认传输 (不加密，理论最快)"
     echo -e "${GREEN}[2]${NC} TLS (自签证书，自动生成)"
     echo -e "${GREEN}[3]${NC} TLS (CA签发证书)"
     echo -e "${GREEN}[4]${NC} TLS+WebSocket (自签证书，伪装HTTPS流量)"
@@ -3771,6 +3756,62 @@ install_realm_from_local_package() {
     fi
 }
 
+# 快速GitHub连通性测试
+test_github_connectivity() {
+    if curl -s --connect-timeout 2 --max-time 3 "https://github.com" >/dev/null 2>&1; then
+        return 0  # 连通
+    else
+        return 1  # 不连通
+    fi
+}
+
+# 多源下载策略
+download_with_fallback() {
+    local base_url="$1"
+    local filename="$2"
+
+    local sources=(
+        ""  # 官方源
+        "https://demo.52013120.xyz/"
+        "https://proxy.vvvv.ee/"
+    )
+
+    # 如果GitHub不连通，跳过官方源
+    if ! test_github_connectivity; then
+        echo -e "${YELLOW}⚠ GitHub官方源连接超时，使用加速源${NC}" >&2
+        sources=("${sources[@]:1}")
+    else
+        echo -e "${GREEN}✓ GitHub官方源连通正常${NC}" >&2
+    fi
+
+    # 依次尝试各个源
+    for proxy in "${sources[@]}"; do
+        local full_url="${proxy}${base_url}"
+        local source_name
+
+        if [ -z "$proxy" ]; then
+            source_name="GitHub官方源"
+        else
+            source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+        fi
+
+        echo -e "${BLUE}正在尝试 $source_name${NC}" >&2
+
+        # 使用现有的reliable_download函数判断成功/失败
+        local download_result
+        if download_result=$(reliable_download "$full_url" "$filename"); then
+            echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
+            echo "$download_result"  # 返回文件路径
+            return 0
+        else
+            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}" >&2
+        fi
+    done
+
+    echo -e "${RED}✗ 所有下载源均失败${NC}" >&2
+    return 1
+}
+
 # 简洁高效的下载函数
 reliable_download() {
     local url="$1"
@@ -3912,13 +3953,13 @@ install_realm() {
             ;;
     esac
 
-    # 构建下载URL - 只使用GitHub官方源
+    # 构建下载URL - 支持多源下载
     DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}.tar.gz"
-    echo -e "${BLUE}下载地址: ${DOWNLOAD_URL}${NC}"
+    echo -e "${BLUE}目标文件: realm-${ARCH}.tar.gz${NC}"
 
-    # 下载realm
+    # 使用多源下载策略
     local download_file=""
-    if download_file=$(reliable_download "$DOWNLOAD_URL" "realm.tar.gz"); then
+    if download_file=$(download_with_fallback "$DOWNLOAD_URL" "realm.tar.gz"); then
         echo -e "${GREEN}✓ 下载成功: ${download_file}${NC}"
     else
         echo -e "${RED}✗ 下载失败${NC}"
@@ -4216,7 +4257,7 @@ generate_endpoints_from_rules() {
                         # 中转服务器使用动态输入的IP
                         default_listen_ip=$(get_nat_server_listen_ip)
                     fi
-                    port_configs[$port_key]="$PROTOCOL_TYPE|$SECURITY_LEVEL|$TLS_SERVER_NAME|$TLS_CERT_PATH|$TLS_KEY_PATH|$BALANCE_MODE|${LISTEN_IP:-$default_listen_ip}|$THROUGH_IP"
+                    port_configs[$port_key]="$SECURITY_LEVEL|$TLS_SERVER_NAME|$TLS_CERT_PATH|$TLS_KEY_PATH|$BALANCE_MODE|${LISTEN_IP:-$default_listen_ip}|$THROUGH_IP"
                     # 存储权重配置和角色信息
                     port_weights[$port_key]="$WEIGHTS"
                     port_roles[$port_key]="$RULE_ROLE"
@@ -4366,7 +4407,7 @@ generate_endpoints_from_rules() {
         fi
 
         # 解析端口配置
-        IFS='|' read -r protocol_type security_level tls_server_name tls_cert_path tls_key_path balance_mode listen_ip through_ip <<< "${port_configs[$port_key]}"
+        IFS='|' read -r security_level tls_server_name tls_cert_path tls_key_path balance_mode listen_ip through_ip <<< "${port_configs[$port_key]}"
         # 如果没有listen_ip字段（向后兼容），根据角色使用对应的默认值
         if [ -z "$listen_ip" ]; then
             local role="${port_roles[$port_key]:-1}"
@@ -4811,19 +4852,50 @@ self_install() {
         chmod +x "${install_dir}/${script_name}"
         echo -e "${GREEN}✓ 脚本已安装到: ${install_dir}/${script_name}${NC}"
 
-
     elif [ "${install_dir}/${script_name}" -ef "$0" ]; then
         echo -e "${GREEN}✓ 脚本已在系统目录中${NC}"
     else
         # 如果是通过管道运行的，需要重新下载
         echo -e "${BLUE}正在从GitHub下载脚本...${NC}"
-        local github_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
+        local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
 
-        if curl -fsSL "$github_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
-            chmod +x "${install_dir}/${script_name}"
-            echo -e "${GREEN}✓ 脚本下载并安装成功${NC}"
-        else
-            echo -e "${RED}✗ 脚本下载失败${NC}"
+        # 使用多源下载脚本
+        local sources=(
+            ""  # 官方源
+            "https://demo.52013120.xyz/"
+            "https://proxy.vvvv.ee/"
+        )
+
+        # 如果GitHub不连通，跳过官方源
+        if ! test_github_connectivity; then
+            sources=("${sources[@]:1}")
+        fi
+
+        local download_success=false
+        for proxy in "${sources[@]}"; do
+            local script_url="${proxy}${base_script_url}"
+            local source_name
+
+            if [ -z "$proxy" ]; then
+                source_name="GitHub官方源"
+            else
+                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+            fi
+
+            echo -e "${BLUE}尝试 $source_name${NC}"
+
+            if curl -fsSL "$script_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
+                chmod +x "${install_dir}/${script_name}"
+                echo -e "${GREEN}✓ $source_name 脚本下载成功${NC}"
+                download_success=true
+                break
+            else
+                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+            fi
+        done
+
+        if [ "$download_success" = false ]; then
+            echo -e "${RED}✗ 所有源脚本下载均失败${NC}"
             return 1
         fi
     fi
@@ -4858,7 +4930,7 @@ EOF
 
 # 智能安装和配置流程
 smart_install() {
-    echo -e "${GREEN}=== xwPF Realm全功能智能安装器 v1.0.0 ===${NC}"
+    echo -e "${GREEN}=== xwPF Realm 一键脚本智能安装 v1.0.0 ===${NC}"
     echo ""
 
     # 步骤1: 检测系统
@@ -4883,9 +4955,9 @@ smart_install() {
         echo -e "${GREEN}=== 安装完成！ ===${NC}"
         echo -e "${YELLOW}输入快捷命令 ${GREEN}pf${YELLOW} 进入脚本交互界面${NC}"
     else
-        echo -e "${RED}错误: 无法从GitHub获取最新版本号${NC}"
-        echo -e "${YELLOW}网络可能不稳定或GitHub访问受限${NC}"
-        echo -e "${BLUE}稍后重试或参考https://github.com/zywe03/realm-xwPF#网络受限环境安装${NC}"
+        echo -e "${RED}错误: realm安装失败${NC}"
+        echo -e "${YELLOW}可能原因: 网络连接问题或所有下载源均不可用${NC}"
+        echo -e "${BLUE}稍后重试或参考https://github.com/zywe03/realm-xwPF#离线安装${NC}"
         echo -e "${YELLOW}输入快捷命令 ${GREEN}pf${YELLOW} 可进入脚本交互界面${NC}"
     fi
 }
@@ -6770,7 +6842,7 @@ read_rule_file() {
 
     # 清空变量
     unset RULE_ID RULE_NAME RULE_ROLE LISTEN_PORT LISTEN_IP THROUGH_IP REMOTE_HOST REMOTE_PORT
-    unset FORWARD_TARGET PROTOCOL_TYPE SECURITY_LEVEL
+    unset FORWARD_TARGET SECURITY_LEVEL
     unset TLS_SERVER_NAME TLS_CERT_PATH TLS_KEY_PATH WS_PATH
     unset ENABLED BALANCE_MODE FAILOVER_ENABLED HEALTH_CHECK_INTERVAL
     unset FAILURE_THRESHOLD SUCCESS_THRESHOLD CONNECTION_TIMEOUT
