@@ -43,11 +43,11 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 
 方法一：使用 curl 加速下载
 ```bash
-curl -fsSL https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+curl -fsSL https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 方法二：使用 wget 加速下载
 ```bash
-wget -qO- https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ## 🧭 无法联网的离线安装
@@ -253,7 +253,7 @@ wget -qO- https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/rea
 ## 🙏 致谢
 
 - [zhboner/realm](https://github.com/zhboner/realm) - 提供核心的 Realm 程序
-- "https://demo.52013120.xyz/""https://proxy.vvvv.ee/"  -提供公益加速源
+- "https://demo.52013120.xyz/""https://proxy.vvvv.ee/""https://ghfast.top/"  -提供公益加速源
 - 所有为项目提供反馈和建议的用户
 
 ---

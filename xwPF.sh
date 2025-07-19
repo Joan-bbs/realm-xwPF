@@ -3772,8 +3772,9 @@ download_with_fallback() {
 
     local sources=(
         ""  # 官方源
-        "https://demo.52013120.xyz/"
         "https://proxy.vvvv.ee/"
+        "https://demo.52013120.xyz/"
+        "https://ghfast.top/"
     )
 
     # 如果GitHub不连通，跳过官方源
@@ -3828,7 +3829,7 @@ reliable_download() {
 
     # curl下载（带进度条）
     if command -v curl >/dev/null 2>&1; then
-        if curl -L --connect-timeout 10 --retry 3 --progress-bar --fail -o "$file_path" "$url"; then
+        if curl -L --progress-bar --fail -o "$file_path" "$url"; then
             if [ -f "$file_path" ] && [ -s "$file_path" ]; then
                 echo "$file_path"
                 return 0
@@ -3839,7 +3840,7 @@ reliable_download() {
     # wget备用
     if command -v wget >/dev/null 2>&1; then
         rm -f "$file_path"
-        if wget --timeout=10 --tries=3 --progress=bar:force -O "$file_path" "$url"; then
+        if wget --progress=bar:force -O "$file_path" "$url"; then
             if [ -f "$file_path" ] && [ -s "$file_path" ]; then
                 echo "$file_path"
                 return 0
@@ -4857,13 +4858,45 @@ self_install() {
     else
         # 如果是通过管道运行的，需要重新下载
         echo -e "${BLUE}正在从GitHub下载脚本...${NC}"
-        local github_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
+        local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
 
-        if curl -fsSL "$github_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
-            chmod +x "${install_dir}/${script_name}"
-            echo -e "${GREEN}✓ 脚本下载并安装成功${NC}"
-        else
-            echo -e "${RED}✗ 脚本下载失败${NC}"
+        # 使用多源下载脚本
+        local sources=(
+            ""  # 官方源
+            "https://demo.52013120.xyz/"
+            "https://proxy.vvvv.ee/"
+        )
+
+        # 如果GitHub不连通，跳过官方源
+        if ! test_github_connectivity; then
+            sources=("${sources[@]:1}")
+        fi
+
+        local download_success=false
+        for proxy in "${sources[@]}"; do
+            local script_url="${proxy}${base_script_url}"
+            local source_name
+
+            if [ -z "$proxy" ]; then
+                source_name="GitHub官方源"
+            else
+                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+            fi
+
+            echo -e "${BLUE}尝试 $source_name${NC}"
+
+            if curl -fsSL "$script_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
+                chmod +x "${install_dir}/${script_name}"
+                echo -e "${GREEN}✓ $source_name 脚本下载成功${NC}"
+                download_success=true
+                break
+            else
+                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+            fi
+        done
+
+        if [ "$download_success" = false ]; then
+            echo -e "${RED}✗ 所有源脚本下载均失败${NC}"
             return 1
         fi
     fi

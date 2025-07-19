@@ -43,11 +43,11 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 
 **Method 1: Using curl with accelerated download**
 ```bash
-curl -fsSL https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+curl -fsSL https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 **Method 2: Using wget with accelerated download**
 ```bash
-wget -qO- https://demo.52013120.xyz/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ## 🧭 Completely Offline Installation
@@ -254,7 +254,7 @@ File organization structure after installation:
 
 - [zhboner/realm](https://github.com/zhboner/realm) - Providing the core Realm program
 - All users who provided feedback and suggestions for the project
-- "https://demo.52013120.xyz/" "https://proxy.vvvv.ee/" - Providing public accelerated sources
+- "https://demo.52013120.xyz/" "https://proxy.vvvv.ee/" "https://ghfast.top/" - Providing public accelerated sources
 
 ---
 
