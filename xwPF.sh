@@ -18,17 +18,9 @@ TLS_CERT_PATH=""   # TLS证书路径
 TLS_KEY_PATH=""    # TLS私钥路径
 TLS_SERVER_NAME="" # TLS服务器名称(SNI)
 
-# 转发配置管理变量
-RULES_DIR="${CONFIG_DIR}/rules"
 
-# 定时任务管理变量
-CRON_DIR="${CONFIG_DIR}/cron"
-CRON_TASKS_FILE="${CRON_DIR}/tasks.conf"
 RULE_ID=""
 RULE_NAME=""
-SECURITY_LEVEL=""
-TLS_CERT_PATH=""
-TLS_KEY_PATH=""
 
 #--- 脚本核心逻辑 ---
 
@@ -51,6 +43,10 @@ LOG_PATH="/var/log/realm.log"
 # 转发配置管理路径
 RULES_DIR="${CONFIG_DIR}/rules"
 
+# 定时任务管理路径
+CRON_DIR="${CONFIG_DIR}/cron"
+CRON_TASKS_FILE="${CRON_DIR}/tasks.conf"
+
 # 默认伪装域名（双端realm搭建隧道需要相同SNI）
 DEFAULT_SNI_DOMAIN="www.tesla.com"
 
@@ -67,7 +63,7 @@ check_root() {
     fi
 }
 
-# 检测系统类型
+# 检测系统类型（仅支持Debian/Ubuntu）
 detect_system() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -76,19 +72,30 @@ detect_system() {
     elif type lsb_release >/dev/null 2>&1; then
         OS=$(lsb_release -si)
         VER=$(lsb_release -sr)
-    elif [ -f /etc/redhat-release ]; then
-        OS="CentOS"
-        VER=$(cat /etc/redhat-release | sed 's/.*release //' | sed 's/ .*//')
     else
         OS=$(uname -s)
         VER=$(uname -r)
     fi
+
+    # 验证是否为支持的系统
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo -e "${RED}错误: 当前仅支持 Ubuntu/Debian 系统${NC}"
+        echo -e "${YELLOW}检测到系统: $OS $VER${NC}"
+        exit 1
+    fi
+}
+
+# 检测netcat-openbsd是否已安装
+check_netcat_openbsd() {
+    # 检查netcat-openbsd包是否已安装
+    dpkg -l netcat-openbsd >/dev/null 2>&1
+    return $?
 }
 
 # 自动安装缺失的依赖工具
 install_dependencies() {
     local missing_tools=()
-    local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc" "nc")
+    local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
 
     echo -e "${YELLOW}正在检查必备依赖工具...${NC}"
 
@@ -101,33 +108,35 @@ install_dependencies() {
         fi
     done
 
+    # 单独检查netcat-openbsd版本
+    if ! check_netcat_openbsd; then
+        missing_tools+=("nc")
+        echo -e "${YELLOW}✗${NC} nc 需要安装netcat-openbsd版本"
+    else
+        echo -e "${GREEN}✓${NC} nc (netcat-openbsd) 已安装"
+    fi
+
     # 如果有缺失的工具，自动安装
     if [ ${#missing_tools[@]} -gt 0 ]; then
         echo -e "${YELLOW}需要安装以下工具: ${missing_tools[*]}${NC}"
 
-        # 使用 apt-get 安装依赖 (仅Ubuntu/Debian)
-        if command -v apt-get >/dev/null 2>&1; then
-            echo -e "${BLUE}使用 apt-get 安装依赖...${NC}"
-            apt-get update -qq >/dev/null 2>&1
-            for tool in "${missing_tools[@]}"; do
-                case "$tool" in
-                    "curl") apt-get install -y curl >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} curl 安装成功" ;;
-                    "wget") apt-get install -y wget >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} wget 安装成功" ;;
-                    "tar") apt-get install -y tar >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} tar 安装成功" ;;
-                    "systemctl") apt-get install -y systemd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} systemd 安装成功" ;;
-                    "bc") apt-get install -y bc >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} bc 安装成功" ;;
-                    "nc")
-                        # 确保安装正确的netcat版本
-                        apt-get remove -y netcat-traditional >/dev/null 2>&1
-                        apt-get install -y netcat-openbsd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} nc 已安装"
-                        ;;
-                esac
-            done
-        else
-            echo -e "${RED}错误: 当前仅支持 Ubuntu/Debian 系统${NC}"
-            echo -e "${YELLOW}请在 Ubuntu 或 Debian 系统上运行此脚本${NC}"
-            exit 1
-        fi
+        # 使用 apt-get 安装依赖
+        echo -e "${BLUE}使用 apt-get 安装依赖...${NC}"
+        apt-get update -qq >/dev/null 2>&1
+        for tool in "${missing_tools[@]}"; do
+            case "$tool" in
+                "curl") apt-get install -y curl >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} curl 安装成功" ;;
+                "wget") apt-get install -y wget >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} wget 安装成功" ;;
+                "tar") apt-get install -y tar >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} tar 安装成功" ;;
+                "systemctl") apt-get install -y systemd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} systemd 安装成功" ;;
+                "bc") apt-get install -y bc >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} bc 安装成功" ;;
+                "nc")
+                    # 确保安装正确的netcat版本
+                    apt-get remove -y netcat-traditional >/dev/null 2>&1
+                    apt-get install -y netcat-openbsd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} nc (netcat-openbsd) 安装成功"
+                    ;;
+            esac
+        done
     else
         echo -e "${GREEN}所有必备工具已安装完成${NC}"
     fi
@@ -137,17 +146,23 @@ install_dependencies() {
 # 检查必备依赖工具
 check_dependencies() {
     local missing_tools=()
-    local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc" "nc")
+    local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
 
+    # 检查基础工具
     for tool in "${tools_to_check[@]}"; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing_tools+=("$tool")
         fi
     done
 
+    # 单独检查netcat-openbsd
+    if ! check_netcat_openbsd; then
+        missing_tools+=("nc")
+    fi
+
     if [ ${#missing_tools[@]} -gt 0 ]; then
         echo -e "${RED}错误: 缺少必备工具: ${missing_tools[*]}${NC}"
-        echo -e "${YELLOW}请重新运行安装命令来自动安装依赖:${NC}"
+        echo -e "${YELLOW}请先选择菜单选项1进行安装，或手动运行安装命令:${NC}"
         echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh | sudo bash -s install${NC}"
         exit 1
     fi
@@ -250,16 +265,8 @@ check_port_usage() {
         return 0
     fi
 
-    # 使用 ss 命令进行端口检测（同时检查TCP和UDP）
-    local port_check_cmd=""
-    if command -v ss >/dev/null 2>&1; then
-        port_check_cmd="ss -tulnp"
-    elif command -v netstat >/dev/null 2>&1; then
-        port_check_cmd="netstat -tulnp"
-    else
-        echo -e "${YELLOW}警告: 无法检测端口占用状态（缺少 ss 或 netstat 命令）${NC}"
-        return 0
-    fi
+    # 使用 ss 命令进行端口检测（Debian/Ubuntu标准工具）
+    local port_check_cmd="ss -tulnp"
 
     # 查询端口占用情况
     local port_output=$($port_check_cmd 2>/dev/null | grep ":${port} ")
@@ -343,22 +350,8 @@ check_connectivity() {
         return 1
     fi
 
-    # 使用nc检测连通性
-    if command -v nc >/dev/null 2>&1; then
-        nc -z -w$timeout "$target" "$port" >/dev/null 2>&1
-        return $?
-    fi
-
-    # 使用telnet作为备选
-    if command -v telnet >/dev/null 2>&1; then
-        timeout $timeout telnet "$target" "$port" >/dev/null 2>&1 <<EOF
-quit
-EOF
-        return $?
-    fi
-
-    # 使用bash内置的网络功能
-    timeout $timeout bash -c "echo >/dev/tcp/$target/$port" >/dev/null 2>&1
+    # 使用nc检测连通性（netcat-openbsd已确保安装）
+    nc -z -w$timeout "$target" "$port" >/dev/null 2>&1
     return $?
 }
 
@@ -5090,16 +5083,8 @@ service_status() {
     echo ""
     echo -e "${BLUE}端口监听状态:${NC}"
 
-    # 优先使用 ss 命令检测端口
-    local port_check_cmd=""
-    if command -v ss >/dev/null 2>&1; then
-        port_check_cmd="ss -tlnp"
-    elif command -v netstat >/dev/null 2>&1; then
-        port_check_cmd="netstat -tlnp"
-    else
-        echo -e "${YELLOW}无法检测端口状态（缺少 ss 或 netstat 命令）${NC}"
-        return
-    fi
+    # 使用 ss 命令检测端口（Debian/Ubuntu标准工具）
+    local port_check_cmd="ss -tlnp"
 
     # 检查端口监听状态
     if [ "$has_rules" = true ]; then
@@ -6276,7 +6261,6 @@ show_menu() {
 
         case $choice in
             1)
-                check_dependencies
                 smart_install
                 read -p "按回车键继续..."
                 ;;
@@ -6791,31 +6775,19 @@ if ! flock -n 200; then
     exit 0
 fi
 
-# 健康检查函数（复用脚本中的逻辑）
+# 健康检查函数
 check_target_health() {
     local target="$1"
     local port="$2"
     local timeout="${3:-3}"
 
-    # 使用nc检测连通性
-    if command -v nc >/dev/null 2>&1; then
-        nc -z -w"$timeout" "$target" "$port" >/dev/null 2>&1
-        return $?
-    fi
-
-    # 使用telnet作为备选
-    if command -v telnet >/dev/null 2>&1; then
-        timeout "$timeout" telnet "$target" "$port" >/dev/null 2>&1 <<< "quit"
-        return $?
-    fi
-
-    # 使用bash内置的网络功能
-    timeout "$timeout" bash -c "echo >/dev/tcp/$target/$port" >/dev/null 2>&1
+    # 使用nc检测连通性（netcat-openbsd已确保安装）
+    nc -z -w"$timeout" "$target" "$port" >/dev/null 2>&1
     return $?
 }
 
 # 健康检查脚本专用的读取规则文件函数
-read_rule_file() {
+read_rule_file_for_health_check() {
     local rule_file="$1"
     if [ ! -f "$rule_file" ]; then
         return 1
@@ -6851,7 +6823,7 @@ for rule_file in "$RULES_DIR"/rule-*.conf; do
         continue
     fi
 
-    if ! read_rule_file "$rule_file"; then
+    if ! read_rule_file_for_health_check "$rule_file"; then
         continue
     fi
 
