@@ -18,13 +18,10 @@ TLS_CERT_PATH=""   # TLS证书路径
 TLS_KEY_PATH=""    # TLS私钥路径
 TLS_SERVER_NAME="" # TLS服务器名称(SNI)
 
-
 RULE_ID=""
 RULE_NAME=""
 
-#--- 脚本核心逻辑 ---
-
-# 颜色设计 - 按功能分配，简洁美观
+# 颜色定义
 RED='\033[0;31m'      # 错误、危险、禁用状态
 GREEN='\033[0;32m'    # 成功、正常、启用状态
 YELLOW='\033[1;33m'   # 警告、特殊状态、重要提示
@@ -92,7 +89,7 @@ check_netcat_openbsd() {
     return $?
 }
 
-# 自动安装缺失的依赖工具
+# 安装依赖工具
 install_dependencies() {
     local missing_tools=()
     local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
@@ -121,7 +118,7 @@ install_dependencies() {
         echo -e "${YELLOW}需要安装以下工具: ${missing_tools[*]}${NC}"
 
         # 使用 apt-get 安装依赖
-        echo -e "${BLUE}使用 apt-get 安装依赖...${NC}"
+        echo -e "${BLUE}使用 apt-get 安装依赖,下载中...${NC}"
         apt-get update -qq >/dev/null 2>&1
         for tool in "${missing_tools[@]}"; do
             case "$tool" in
@@ -172,16 +169,28 @@ check_dependencies() {
 get_public_ip() {
     local ip_type="$1"  # ipv4 或 ipv6
     local ip=""
+    local curl_opts=""
 
-    if [ "$ip_type" = "ipv4" ]; then
-        # 使用cloudflare trace服务获取IPv4
-        ip=$(curl -s --connect-timeout 5 --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | cut -d'=' -f2 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
-    elif [ "$ip_type" = "ipv6" ]; then
-        # 使用cloudflare trace服务获取IPv6
-        ip=$(curl -s --connect-timeout 5 --max-time 10 -6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | cut -d'=' -f2 | grep -E '^[0-9a-fA-F:]+$')
+    # 设置IPv6选项
+    if [ "$ip_type" = "ipv6" ]; then
+        curl_opts="-6"
     fi
 
-    echo "$ip"
+    # 优先使用ipinfo.io
+    ip=$(curl -s --connect-timeout 5 --max-time 10 $curl_opts https://ipinfo.io/ip 2>/dev/null | tr -d '\n\r ')
+    if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
+        echo "$ip"
+        return 0
+    fi
+
+    # 备用cloudflare trace
+    ip=$(curl -s --connect-timeout 5 --max-time 10 $curl_opts https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | cut -d'=' -f2 | tr -d '\n\r ')
+    if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
+        echo "$ip"
+        return 0
+    fi
+
+    echo ""
 }
 
 # 写入状态文件
@@ -295,7 +304,7 @@ check_port_usage() {
     return 0
 }
 
-# 检查防火墙并询问是否放行端口
+# 检查防火墙
 check_firewall() {
     local port="$1"
     local service_name="$2"
@@ -385,8 +394,6 @@ validate_ip() {
     return 1
 }
 
-
-
 # 验证转发目标地址（支持IP、域名、多地址）
 validate_target_address() {
     local target="$1"
@@ -431,8 +438,6 @@ validate_single_address() {
 }
 
 #--- 配置生成函数 ---
-
-
 
 # 获取传输配置
 get_transport_config() {
@@ -507,7 +512,7 @@ get_transport_config() {
     esac
 }
 
-# 内置日志管理函数（优雅控制日志大小）
+# 内置日志管理函数（控制日志大小）
 manage_log_size() {
     local log_file="$1"
     local max_size_mb="${2:-10}"  # 默认10MB限制
@@ -633,8 +638,6 @@ generate_forward_endpoints_config() {
     fi
 }
 
-
-
 #--- 转发配置管理函数 ---
 
 # 初始化规则目录
@@ -662,13 +665,13 @@ generate_rule_id() {
     echo $((max_id + 1))
 }
 
-
-
 # 读取规则文件
 read_rule_file() {
     local rule_file="$1"
     if [ -f "$rule_file" ]; then
         source "$rule_file"
+        # 向后兼容：为旧规则文件设置默认备注
+        RULE_NOTE="${RULE_NOTE:-}"
         return 0
     else
         return 1
@@ -924,7 +927,11 @@ list_all_rules() {
                 echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME"
                 # 构建安全级别显示
                 local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
-                echo -e "  通用配置: ${YELLOW}$security_display${NC} | 状态: ${status_color}$status_text${NC}"
+                local note_display=""
+                if [ -n "$RULE_NOTE" ]; then
+                    note_display=" | 备注: $RULE_NOTE"
+                fi
+                echo -e "  通用配置: ${YELLOW}$security_display${NC}${note_display} | 状态: ${status_color}$status_text${NC}"
                 # 根据规则角色显示不同的转发信息
                 if [ "$RULE_ROLE" = "2" ]; then
                     # 落地服务器使用FORWARD_TARGET
@@ -945,9 +952,7 @@ list_all_rules() {
     echo -e "${BLUE}共找到 $count 个配置${NC}"
 }
 
-
-
-# 交互式添加转发配置
+# 添加转发配置
 interactive_add_rule() {
     echo -e "${YELLOW}=== 添加新转发配置 ===${NC}"
     echo ""
@@ -1030,6 +1035,7 @@ TLS_SERVER_NAME="$TLS_SERVER_NAME"
 TLS_CERT_PATH="$TLS_CERT_PATH"
 TLS_KEY_PATH="$TLS_KEY_PATH"
 WS_PATH="$WS_PATH"
+RULE_NOTE="$RULE_NOTE"
 ENABLED="true"
 CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
 
@@ -1062,6 +1068,7 @@ TLS_SERVER_NAME="$TLS_SERVER_NAME"
 TLS_CERT_PATH="$TLS_CERT_PATH"
 TLS_KEY_PATH="$TLS_KEY_PATH"
 WS_PATH="$WS_PATH"
+RULE_NOTE="$RULE_NOTE"
 ENABLED="true"
 CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
 
@@ -1548,6 +1555,7 @@ TLS_SERVER_NAME="$tls_server_name"
 TLS_CERT_PATH="$tls_cert_path"
 TLS_KEY_PATH="$tls_key_path"
 WS_PATH="$ws_path"
+RULE_NOTE=""
 ENABLED="true"
 CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
 
@@ -1793,7 +1801,6 @@ except Exception as e:
     sys.exit(1)
 ")
     else
-        # 回退到简化方法
         endpoints_info=$(grep -A 30 '"endpoints"' "$selected_file" | awk '
             /"listen":/ {
                 gsub(/[",]/, "", $2);
@@ -1972,7 +1979,11 @@ rules_management_menu() {
                             local display_ip=$(get_nat_server_listen_ip)
                             local through_display="${THROUGH_IP:-::}"
                             echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
-                        echo -e "    安全: ${YELLOW}$security_display${NC}"
+                            local note_display=""
+                            if [ -n "$RULE_NOTE" ]; then
+                                note_display=" | 备注: $RULE_NOTE"
+                            fi
+                            echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
 
                         fi
                     fi
@@ -2004,7 +2015,11 @@ rules_management_menu() {
                             fi
                             local display_ip=$(get_exit_server_listen_ip)
                             echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
-                        echo -e "    安全: ${YELLOW}$security_display${NC}"
+                            local note_display=""
+                            if [ -n "$RULE_NOTE" ]; then
+                                note_display=" | 备注: $RULE_NOTE"
+                            fi
+                            echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
 
                         fi
                     fi
@@ -2867,7 +2882,7 @@ interactive_role_selection() {
 
 # 中转服务器交互配置
 configure_nat_server() {
-    echo -e "${YELLOW}=== 中转服务器配置(入口出口多数情况默认即可) ===${NC}"
+    echo -e "${YELLOW}=== 中转服务器配置(不了解入口出口一般回车默认即可) ===${NC}"
     echo ""
 
     # 配置监听端口
@@ -2902,6 +2917,7 @@ configure_nat_server() {
                     TLS_CERT_PATH="${TLS_CERT_PATH}"
                     TLS_KEY_PATH="${TLS_KEY_PATH}"
                     WS_PATH="${WS_PATH}"
+                    RULE_NOTE="${RULE_NOTE:-}"  # 复用现有备注
                     echo -e "${GREEN}已读取端口 $NAT_LISTEN_PORT 的现有配置${NC}"
                     break
                 fi
@@ -2910,10 +2926,12 @@ configure_nat_server() {
 
         # 直接跳转到远程服务器配置
     else
+        # 清空可能残留的备注变量（新端口配置）
+        RULE_NOTE=""
         echo ""
 
         while true; do
-            read -p "自定义(指定)入口监听IP地址(客户端连接IP,默认全部监听 ::): " listen_ip_input
+            read -p "自定义(指定)入口监听IP地址(客户端连接IP,回车默认全部监听 ::): " listen_ip_input
 
             if [ -z "$listen_ip_input" ]; then
                 # 使用默认值：双栈监听
@@ -2937,7 +2955,7 @@ configure_nat_server() {
         echo ""
 
         while true; do
-            read -p "自定义(指定)出口IP地址(适用于中转多IP出口情况,默认全部监听 ::): " through_ip_input
+            read -p "自定义(指定)出口IP地址(适用于中转多IP出口情况,回车默认全部监听 ::): " through_ip_input
 
             if [ -z "$through_ip_input" ]; then
                 # 使用默认值：双栈监听
@@ -3140,6 +3158,31 @@ configure_nat_server() {
 
     fi  # 结束端口占用检查的条件判断
 
+    # 配置规则备注
+    echo ""
+    echo -e "${BLUE}=== 规则备注配置 ===${NC}"
+
+    # 检查是否有现有备注（端口复用情况）
+    if [ -n "$RULE_NOTE" ]; then
+        read -p "请输入新的备注(回车使用现有备注$RULE_NOTE): " new_note
+        new_note=$(echo "$new_note" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | cut -c1-50)
+        if [ -n "$new_note" ]; then
+            RULE_NOTE="$new_note"
+            echo -e "${GREEN}备注设置为: $RULE_NOTE${NC}"
+        else
+            echo -e "${GREEN}使用现有备注: $RULE_NOTE${NC}"
+        fi
+    else
+        read -p "请输入当前规则备注(可选，直接回车跳过): " RULE_NOTE
+        # 去除前后空格并限制长度
+        RULE_NOTE=$(echo "$RULE_NOTE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | cut -c1-50)
+        if [ -n "$RULE_NOTE" ]; then
+            echo -e "${GREEN}备注设置为: $RULE_NOTE${NC}"
+        else
+            echo -e "${BLUE}未设置备注${NC}"
+        fi
+    fi
+
     echo ""
 }
 
@@ -3185,7 +3228,7 @@ configure_exit_server() {
     echo ""
 
     # 配置转发目标
-    echo "配置转发目标 (就是你设置的代理服务，SS/singbox/xray等):"
+    echo "配置转发目标 (就是设置好的本地业务软件,服务等等的信息):"
     echo ""
     echo -e "${YELLOW}双端realm搭建隧道${NC}"
     echo -e "${YELLOW}ipv4输入127.0.0.1,IPv6输入: ::1${NC}"
@@ -3216,7 +3259,7 @@ configure_exit_server() {
 
     # 转发目标端口配置
     while true; do
-        read -p "转发目标端口(代理端口): " FORWARD_PORT
+        read -p "转发目标端口(业务端口): " FORWARD_PORT
         if validate_port "$FORWARD_PORT"; then
             echo -e "${GREEN}转发端口设置为: $FORWARD_PORT${NC}"
             break
@@ -3399,6 +3442,19 @@ configure_exit_server() {
                 ;;
         esac
     done
+
+    # 配置规则备注
+    echo ""
+    echo -e "${BLUE}=== 规则备注配置 ===${NC}"
+
+    read -p "请输入当前规则备注(可选，直接回车跳过): " RULE_NOTE
+    # 去除前后空格并限制长度
+    RULE_NOTE=$(echo "$RULE_NOTE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | cut -c1-50)
+    if [ -n "$RULE_NOTE" ]; then
+        echo -e "${GREEN}备注设置为: $RULE_NOTE${NC}"
+    else
+        echo -e "${BLUE}未设置备注${NC}"
+    fi
 
     echo ""
 }
@@ -3748,7 +3804,6 @@ install_realm_from_local_package() {
         return 1
     fi
 }
-
 
 # 多源下载策略
 download_with_fallback() {
@@ -4809,8 +4864,6 @@ EOF
     # 启用并启动服务
     systemctl enable realm >/dev/null 2>&1
     systemctl start realm >/dev/null 2>&1
-
-    echo -e "${GREEN}✓ 安装完成${NC}"
 }
 
 # 自安装脚本到系统
@@ -4824,14 +4877,54 @@ self_install() {
     # 创建安装目录
     mkdir -p "$install_dir"
 
-    # 复制脚本到系统目录
-    if [ -f "$0" ] && [ "$0" != "${install_dir}/${script_name}" ]; then
+    # 检查系统目录是否已有脚本，优先执行更新逻辑
+    if [ -f "${install_dir}/${script_name}" ]; then
+        echo -e "${GREEN}✓ 检测到系统已安装脚本，正在更新...${NC}"
+
+        # 自动从GitHub下载最新版本覆盖更新
+        echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
+        local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
+
+        # 使用多源下载脚本
+        local sources=(
+            ""  # 官方源
+            "https://proxy.vvvv.ee/"
+            "https://demo.52013120.xyz/"
+            "https://ghfast.top/"
+        )
+
+        local download_success=false
+        for proxy in "${sources[@]}"; do
+            local script_url="${proxy}${base_script_url}"
+            local source_name
+
+            if [ -z "$proxy" ]; then
+                source_name="GitHub官方源"
+            else
+                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+            fi
+
+            echo -e "${BLUE}尝试 $source_name${NC}"
+
+            if curl -fsSL "$script_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
+                chmod +x "${install_dir}/${script_name}"
+                echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
+                download_success=true
+                break
+            else
+                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+            fi
+        done
+
+        if [ "$download_success" = false ]; then
+            echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
+            echo -e "${BLUE}使用现有脚本版本${NC}"
+        fi
+    elif [ -f "$0" ]; then
+        # 首次安装：复制脚本到系统目录
         cp "$0" "${install_dir}/${script_name}"
         chmod +x "${install_dir}/${script_name}"
         echo -e "${GREEN}✓ 脚本已安装到: ${install_dir}/${script_name}${NC}"
-
-    elif [ "${install_dir}/${script_name}" -ef "$0" ]; then
-        echo -e "${GREEN}✓ 脚本已在系统目录中${NC}"
     else
         # 如果是通过管道运行的，需要重新下载
         echo -e "${BLUE}正在从GitHub下载脚本...${NC}"
@@ -5051,7 +5144,11 @@ service_status() {
                     fi
                     # 构建安全级别显示
                     local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
-                    echo -e "    安全: ${YELLOW}$security_display${NC}"
+                    local note_display=""
+                    if [ -n "$RULE_NOTE" ]; then
+                        note_display=" | 备注: $RULE_NOTE"
+                    fi
+                    echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
 
                 fi
             fi
@@ -5636,7 +5733,11 @@ show_config() {
                             echo -e "    中转: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                         fi
                         local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
-                        echo -e "    安全: ${YELLOW}$security_display${NC}"
+                        local note_display=""
+                        if [ -n "$RULE_NOTE" ]; then
+                            note_display=" | 备注: $RULE_NOTE"
+                        fi
+                        echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
 
                         if [ "$SECURITY_LEVEL" = "tls_self" ]; then
                             local display_sni="${TLS_SERVER_NAME:-$DEFAULT_SNI_DOMAIN}"
@@ -5732,7 +5833,7 @@ show_brief_status() {
     # 检查 realm 二进制文件是否存在
     if [ ! -f "${REALM_PATH}" ] || [ ! -x "${REALM_PATH}" ]; then
         echo -e " Realm状态：${RED} 未安装 ${NC}"
-        echo -e "${YELLOW}请选择 1. 安装配置 安装 Realm 程序${NC}"
+        echo -e "${YELLOW}请选择 1. 安装(更新)程序,脚本 ${NC}"
         return
     fi
 
@@ -5798,7 +5899,11 @@ show_brief_status() {
                         local display_ip=$(get_nat_server_listen_ip)
                         local through_display="${THROUGH_IP:-::}"
                         echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
-                        echo -e "    安全: ${YELLOW}$security_display${NC}"
+                        local note_display=""
+                        if [ -n "$RULE_NOTE" ]; then
+                            note_display=" | 备注: $RULE_NOTE"
+                        fi
+                        echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
 
                     fi
                 fi
@@ -5830,7 +5935,11 @@ show_brief_status() {
                         fi
                         local display_ip=$(get_exit_server_listen_ip)
                         echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
-                        echo -e "    安全: ${YELLOW}$security_display${NC}"
+                        local note_display=""
+                        if [ -n "$RULE_NOTE" ]; then
+                            note_display=" | 备注: $RULE_NOTE"
+                        fi
+                        echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
 
                     fi
                 fi
@@ -6233,6 +6342,74 @@ cron_management_menu() {
     done
 }
 
+# 下载中转网络链路测试脚本
+download_speedtest_script() {
+    local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
+    local target_path="/etc/realm/speedtest.sh"
+
+    echo -e "${YELLOW}首次使用测速功能，正在下载测速脚本...${NC}"
+
+    # 创建目录
+    mkdir -p "$(dirname "$target_path")"
+
+    # 使用多源下载机制
+    local sources=(
+        ""  # 官方源
+        "https://proxy.vvvv.ee/"
+        "https://ghproxy.com/"
+    )
+
+    local download_success=false
+    for prefix in "${sources[@]}"; do
+        local full_url="${prefix}${script_url}"
+        echo -e "${BLUE}尝试下载: ${full_url}${NC}"
+
+        if curl -fsSL --connect-timeout 10 --max-time 30 "$full_url" -o "$target_path"; then
+            chmod +x "$target_path"
+            echo -e "${GREEN}✓ 测速脚本下载成功${NC}"
+            download_success=true
+            break
+        else
+            echo -e "${RED}✗ 下载失败，尝试下一个源...${NC}"
+        fi
+    done
+
+    if [ "$download_success" = false ]; then
+        echo -e "${RED}✗ 所有下载源均失败，请检查网络连接${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
+# 中转网络链路测试菜单
+speedtest_menu() {
+    local speedtest_script="/etc/realm/speedtest.sh"
+
+    # 检查测速脚本是否存在
+    if [ ! -f "$speedtest_script" ]; then
+        if ! download_speedtest_script; then
+            echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
+            read -p "按回车键返回主菜单..."
+            return 1
+        fi
+    fi
+
+    # 检查脚本是否可执行
+    if [ ! -x "$speedtest_script" ]; then
+        chmod +x "$speedtest_script"
+    fi
+
+    # 调用测速脚本
+    echo -e "${BLUE}启动中转工具...${NC}"
+    echo ""
+    bash "$speedtest_script"
+
+    # 返回后暂停
+    echo ""
+    read -p "按回车键返回主菜单..."
+}
+
 # 可视化菜单界面
 show_menu() {
     while true; do
@@ -6240,29 +6417,31 @@ show_menu() {
         echo -e "${GREEN}=== xwPF Realm全功能一键脚本 v1.0.0 ===${NC}"
         echo -e "${GREEN}作者主页:https://zywe.de${NC}"
         echo -e "${GREEN}项目开源:https://github.com/zywe03/realm-xwPF${NC}"
+        echo -e "${GREEN}一个开箱即用、轻量可靠、灵活可控的 Realm 转发管理工具${NC}"
         echo -e "${GREEN}原生realm的全部功能+故障转移 | 快捷命令: pf${NC}"
 
         # 显示当前状态
         show_brief_status
 
         echo "请选择操作:"
-        echo -e "${GREEN}1.${NC} 安装配置"
+        echo -e "${GREEN}1.${NC} 安装(更新)程序,脚本"
         echo -e "${BLUE}2.${NC} 转发配置管理"
         echo -e "${GREEN}3.${NC} 重启服务"
         echo -e "${GREEN}4.${NC} 停止服务"
         echo -e "${YELLOW}5.${NC} 定时任务管理"
         echo -e "${GREEN}6.${NC} 查看日志"
-        echo -e "${RED}7.${NC} 卸载服务"
-        echo -e "${YELLOW}8.${NC} 退出"
+        echo -e "${BLUE}7.${NC} 中转网络链路测试"
+        echo -e "${RED}8.${NC} 卸载服务"
+        echo -e "${YELLOW}9.${NC} 退出"
         echo ""
 
-        read -p "请输入选择 [1-8]: " choice
+        read -p "请输入选择 [1-9]: " choice
         echo ""
 
         case $choice in
             1)
                 smart_install
-                read -p "按回车键继续..."
+                exit 0
                 ;;
             2)
                 check_dependencies
@@ -6290,15 +6469,19 @@ show_menu() {
                 ;;
             7)
                 check_dependencies
+                speedtest_menu
+                ;;
+            8)
+                check_dependencies
                 uninstall_realm
                 read -p "按回车键继续..."
                 ;;
-            8)
+            9)
                 echo -e "${BLUE}感谢使用 Realm 端口转发管理脚本！${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-8${NC}"
+                echo -e "${RED}无效选择，请输入 1-9${NC}"
                 read -p "按回车键继续..."
                 ;;
         esac
