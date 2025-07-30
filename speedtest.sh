@@ -127,15 +127,24 @@ check_tool() {
 
 # 记录初始工具状态到文件
 record_initial_status() {
-    if [ ! -f "$INITIAL_STATUS_FILE" ]; then
-        for tool in "${!REQUIRED_TOOLS[@]}"; do
-            if check_tool "$tool"; then
-                echo "$tool=installed" >> "$INITIAL_STATUS_FILE"
-            else
-                echo "$tool=missing" >> "$INITIAL_STATUS_FILE"
-            fi
-        done
+    # 如果状态文件已存在且是今天创建的，则不重新生成
+    if [ -f "$INITIAL_STATUS_FILE" ]; then
+        local file_date=$(date -r "$INITIAL_STATUS_FILE" +%Y%m%d 2>/dev/null || echo "19700101")
+        local today=$(date +%Y%m%d)
+        if [ "$file_date" = "$today" ]; then
+            return 0
+        fi
     fi
+
+    # 重新生成状态文件
+    rm -f "$INITIAL_STATUS_FILE"
+    for tool in "${!REQUIRED_TOOLS[@]}"; do
+        if check_tool "$tool"; then
+            echo "$tool=installed" >> "$INITIAL_STATUS_FILE"
+        else
+            echo "$tool=missing" >> "$INITIAL_STATUS_FILE"
+        fi
+    done
 }
 
 # 检测所有工具状态
