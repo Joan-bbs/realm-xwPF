@@ -103,7 +103,6 @@ declare -A REQUIRED_TOOLS=(
     ["iperf3"]="apt:iperf3"
     ["fping"]="apt:fping"
     ["hping3"]="apt:hping3"
-    ["mtr"]="apt:mtr-tiny"
     ["jq"]="apt:jq"
     ["bc"]="apt:bc"
     ["nexttrace"]="custom:nexttrace"
@@ -1597,7 +1596,7 @@ uninstall_custom_tool() {
 cleanup_system() {
     echo -e "${BLUE}停止相关进程...${NC}"
     pkill -f "iperf3.*-s" 2>/dev/null
-    pkill -f "hping3\|nexttrace\|fping\|mtr" 2>/dev/null
+    pkill -f "hping3\|nexttrace\|fping" 2>/dev/null
 
     echo -e "${BLUE}清理临时文件...${NC}"
     rm -f /tmp/isp_list_* /tmp/geo_list_* "$INITIAL_STATUS_FILE" 2>/dev/null
