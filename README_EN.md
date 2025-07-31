@@ -23,29 +23,21 @@
 **Load Balancing & Failover**
 ![Load Balancing + Failover](https://i.mji.rip/2025/07/17/e545e7ee444a0a2aa3592d080678696c.png)
 
+**Relay Network Link Testing**
+![Relay Network Link Testing](https://i.mji.rip/2025/07/31/2c8a2d147b63c5299bbb7aa02068726e.png)
+
 </details>
 
 ## 🚀 Quick Start
 
 ### One-Click Installation
 
-**Method 1: Using curl**
-```bash
-curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
-```
-
-**Method 2: Using wget**
 ```bash
 wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ### Network-Restricted Environments Use Accelerated Source, One-Click Installation
 
-**Method 1: Using curl with accelerated download**
-```bash
-curl -fsSL https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
-```
-**Method 2: Using wget with accelerated download**
 ```bash
 wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
@@ -79,6 +71,8 @@ Create any directory and place the script and compressed package files there. Wh
 - **🔄 Failover** - Uses system tools to achieve automatic failure detection while maintaining lightweight design
 - **⚖️ Load Balancing** - Supports round-robin, IP hash strategies with configurable weight distribution
 - **🕳️ Tunnel Building** - Dual-realm architecture supports TLS, ws encrypted transmission for tunnel construction
+- **✍️ Rule Comments** - Clear commenting functionality, no need for additional memorization
+- **🛜 Network Link Testing** - Test link latency, bandwidth, stability, and whether routing is detoured
 
 - **📋 Export Configuration Files** - View current configuration, copy and paste to create .json file for export
 - **📒 Import Configuration Files** - Automatically recognize JSON configuration files in the same directory for import, or input complete file path for recognition and import

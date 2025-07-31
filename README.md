@@ -23,29 +23,21 @@
 **负载均衡与故障转移**
 ![负载均衡+故障转移](https://i.mji.rip/2025/07/17/e545e7ee444a0a2aa3592d080678696c.png)
 
+**中转网络链路测试功能**
+![中转网络链路测试](https://i.mji.rip/2025/07/31/2c8a2d147b63c5299bbb7aa02068726e.png)
+
 </details>
 
 ## 🚀 快速开始
 
 ### 一键安装
 
-**方法一：使用 curl**
-```bash
-curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
-```
-
-**方法二：使用 wget**
 ```bash
 wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ### 网络受限使用加速源,一键安装
 
-方法一：使用 curl 加速下载
-```bash
-curl -fsSL https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
-```
-方法二：使用 wget 加速下载
 ```bash
 wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
@@ -79,6 +71,8 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 - **🔄 故障转移** - 使用系统工具,完成自动故障检测,保持轻量化
 - **⚖️ 负载均衡** - 支持轮询、IP哈希等策略，可配置权重分配
 - **🕳️ 搭建隧道** - 双端realm架构支持 TLS，ws 加密传输,搭建隧道
+- **✍️ 规则备注** - 清晰的备注功能,不再需要额外记忆
+- **🛜 网络链路测试** - 测试链路延迟、带宽、稳定性,路由是否绕路
 
 - **📋 导出配置文件** - 查看当前配置,复制粘贴成.json文件导出
 - **📒 导入配置文件** - 自动识别同目录 JSON 配置文件导入,或输入文件完整路径识别导入
@@ -91,7 +85,7 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 - tcp/udp协议
 - 单中转多出口
 - 多中转单出口
-- 指定中转机的某个入口 IP,以及指定某个出口 IP,适用于多IP情况和一入口多出口和多入口一出口的情况
+- 指定中转机的某个入口 IP,以及指定某个出口 IP (适用于多IP情况和一入口多出口和多入口一出口的情况)
 - 更多玩法参考[zhboner/realm](https://github.com/zhboner/realm)
 
 ## 🗺️ 示意图理解不同场景下工作原理(推荐)
