@@ -1108,6 +1108,7 @@ EOF
 # 删除规则
 delete_rule() {
     local rule_id="$1"
+    local skip_confirm="${2:-false}"
     local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
 
     if [ ! -f "$rule_file" ]; then
@@ -1117,23 +1118,99 @@ delete_rule() {
 
     # 读取规则信息
     if read_rule_file "$rule_file"; then
-        echo -e "${YELLOW}即将删除规则:${NC}"
-        echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC}"
-        echo -e "${BLUE}规则名称: ${GREEN}$RULE_NAME${NC}"
-        echo -e "${BLUE}监听端口: ${GREEN}$LISTEN_PORT${NC}"
-        echo ""
+        # 只有在不跳过确认时才显示详情和询问
+        if [ "$skip_confirm" != "true" ]; then
+            echo -e "${YELLOW}即将删除规则:${NC}"
+            echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC}"
+            echo -e "${BLUE}规则名称: ${GREEN}$RULE_NAME${NC}"
+            echo -e "${BLUE}监听端口: ${GREEN}$LISTEN_PORT${NC}"
+            echo ""
 
-        read -p "确认删除此规则？(y/n): " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            rm -f "$rule_file"
-            echo -e "${GREEN}✓ 规则已删除${NC}"
+            read -p "确认删除此规则？(y/n): " confirm
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo "删除已取消"
+                return 1
+            fi
+        fi
+
+        # 删除规则文件
+        if rm -f "$rule_file"; then
+            echo -e "${GREEN}✓ 规则 $rule_id 已删除${NC}"
             return 0
         else
-            echo "删除已取消"
+            echo -e "${RED}✗ 规则 $rule_id 删除失败${NC}"
             return 1
         fi
     else
         echo -e "${RED}错误: 无法读取规则文件${NC}"
+        return 1
+    fi
+}
+
+# 批量删除规则
+batch_delete_rules() {
+    local rule_ids="$1"
+    local ids_array
+    local valid_ids=()
+    local invalid_ids=()
+
+    # 解析逗号分隔的ID
+    IFS=',' read -ra ids_array <<< "$rule_ids"
+
+    # 验证所有ID的有效性并收集规则信息
+    for id in "${ids_array[@]}"; do
+        # 去除空格
+        id=$(echo "$id" | tr -d ' ')
+        if [[ "$id" =~ ^[0-9]+$ ]]; then
+            local rule_file="${RULES_DIR}/rule-${id}.conf"
+            if [ -f "$rule_file" ]; then
+                valid_ids+=("$id")
+            else
+                invalid_ids+=("$id")
+            fi
+        else
+            invalid_ids+=("$id")
+        fi
+    done
+
+    # 检查是否有无效ID
+    if [ ${#invalid_ids[@]} -gt 0 ]; then
+        echo -e "${RED}错误: 以下规则ID无效或不存在: ${invalid_ids[*]}${NC}"
+        return 1
+    fi
+
+    # 检查是否有有效ID
+    if [ ${#valid_ids[@]} -eq 0 ]; then
+        echo -e "${RED}错误: 没有找到有效的规则ID${NC}"
+        return 1
+    fi
+
+    # 显示所有要删除的规则信息
+    echo -e "${YELLOW}即将删除以下规则:${NC}"
+    echo ""
+    for id in "${valid_ids[@]}"; do
+        local rule_file="${RULES_DIR}/rule-${id}.conf"
+        if read_rule_file "$rule_file"; then
+            echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC} | ${BLUE}规则名称: ${GREEN}$RULE_NAME${NC} | ${BLUE}监听端口: ${GREEN}$LISTEN_PORT${NC}"
+        fi
+    done
+    echo ""
+
+    # 批量确认删除
+    read -p "确认删除以上 ${#valid_ids[@]} 个规则？(y/n): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        local deleted_count=0
+        # 循环调用delete_rule，跳过单个确认
+        for id in "${valid_ids[@]}"; do
+            if delete_rule "$id" "true"; then
+                deleted_count=$((deleted_count + 1))
+            fi
+        done
+        echo ""
+        echo -e "${GREEN}批量删除完成，共删除 $deleted_count 个规则${NC}"
+        return 0
+    else
+        echo "批量删除已取消"
         return 1
     fi
 }
@@ -2121,15 +2198,30 @@ rules_management_menu() {
                 echo ""
                 if list_rules_for_management; then
                     echo ""
-                    read -p "请输入要删除的规则ID: " rule_id
-                    if [[ "$rule_id" =~ ^[0-9]+$ ]]; then
-                        delete_rule "$rule_id"
+                    read -p "请输入要删除的规则ID(多ID使用逗号,分隔): " rule_input
+
+                    # 检查输入是否为空
+                    if [ -z "$rule_input" ]; then
+                        echo -e "${RED}错误: 请输入规则ID${NC}"
+                    else
+                        # 判断是单个ID还是多个ID
+                        if [[ "$rule_input" == *","* ]]; then
+                            # 多个ID，使用批量删除
+                            batch_delete_rules "$rule_input"
+                        else
+                            # 单个ID，直接调用delete_rule（不跳过确认）
+                            if [[ "$rule_input" =~ ^[0-9]+$ ]]; then
+                                delete_rule "$rule_input"
+                            else
+                                echo -e "${RED}无效的规则ID${NC}"
+                            fi
+                        fi
+
+                        # 统一处理服务重启
                         if [ $? -eq 0 ]; then
                             echo -e "${YELLOW}正在重启服务以应用配置更改...${NC}"
                             service_restart
                         fi
-                    else
-                        echo -e "${RED}无效的规则ID${NC}"
                     fi
                 fi
                 read -p "按回车键继续..."
