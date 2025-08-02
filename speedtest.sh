@@ -1116,97 +1116,307 @@ detect_ip_version() {
     fi
 }
 
-# 解析nexttrace输出，提取AS路径、运营商、地理位置等信息
+# 检测是否包含非ASCII字符（中文等）
+contains_non_ascii() {
+    local text="$1"
+    # 使用LC_ALL=C来确保正确的字符检测，避免grep错误
+    if LC_ALL=C echo "$text" | grep -q '[^ -~]'; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 提取地理信息
+extract_geo_info() {
+    local line="$1"
+
+    # 精确匹配nexttrace输出格式：行号 + IP地址 + AS号码 + [可选标签] + 地理信息 + 运营商信息
+    # 使用更精确的IPv4地址匹配：[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+    local content=$(echo "$line" | sed 's/^[[:space:]]*[0-9]\+[[:space:]]\+[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}[[:space:]]\+AS[0-9]\+[[:space:]]*\(\[[^]]*\]\)*[[:space:]]*//')
+
+    # 如果内容为空或只是*，直接返回
+    if [ -z "$content" ] || [ "$content" = "*" ]; then
+        return
+    fi
+
+    # 移除行尾的运营商信息（域名、公司名称、标识符等）
+    local geo_part="$content"
+
+    # 1. 移除域名及其后的所有内容
+    geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*[a-zA-Z0-9.-]*\.[a-zA-Z]\{2,\}.*$//')
+
+    # 2. 移除行尾的全大写单词（如 "电信"）
+    geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*[A-Z]\+[[:space:]]*$//')
+
+    # 3. 移除行尾的单个大写字母或数字组合
+    geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*[A-Z0-9]\+[[:space:]]*$//')
+
+    # 4. 移除特殊标记（如方括号内容）
+    geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*\[.*\][[:space:]]*$//')
+
+    # 5. 清理多余的空白字符
+    geo_part=$(echo "$geo_part" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\+/ /g')
+
+    # 验证地理信息的有效性
+    if [ -n "$geo_part" ] && [ "$geo_part" != "*" ] && [ ${#geo_part} -gt 2 ]; then
+        # 排除明显的非地理信息
+        if ! echo "$geo_part" | grep -qE '^[0-9]+$|^RFC[0-9]+$|^[A-Z]+$|^[a-z]+$'; then
+            # 确保包含有意义的地理信息（中文字符或多个单词）
+            if contains_non_ascii "$geo_part" || echo "$geo_part" | grep -q '[[:space:]]'; then
+                echo "$geo_part"
+            fi
+        fi
+    fi
+}
+
+# 提取运营商信息 - 优先标签，统一格式
+extract_isp_info() {
+    local line="$1"
+    local isp=""
+
+    # 预检查：跳过无效行
+    # 1. 跳过RFC1918私有地址行
+    if echo "$line" | grep -q "RFC1918"; then
+        return
+    fi
+
+    # 2. 必须包含AS号码或方括号标签，否则跳过
+    if ! echo "$line" | grep -qE "AS[0-9]+|\[[^]]+\]"; then
+        return
+    fi
+
+    # 优先级1：提取方括号中的标签（如[CHINANET-GD]、[CN2-Global]）
+    isp=$(echo "$line" | grep -o '\[[^]]*\]' | sed 's/\[//; s/\]//' | head -1)
+    if [ -n "$isp" ] && [ ${#isp} -gt 2 ]; then
+        echo "$isp"
+        return
+    fi
+
+    # 优先级2：提取域名（仅当有有效AS号码时）
+    if echo "$line" | grep -q "AS[0-9]\+"; then
+        isp=$(echo "$line" | grep -oE '[a-zA-Z0-9.-]+\.(com|net|org|io|co|in|cn|uk|de|fr|jp|kr|au|ca|ru|br|mx|it|es|nl|se|no|dk|fi|pl|cz|hu|ro|bg|hr|si|sk|ee|lv|lt|mt|cy|lu|be|at|ch|li|mc|sm|va|ad|gi|im|je|gg|fo|gl|is|tr|gr|mk|al|ba|rs|me|xk|md|ua|by|kz|uz|kg|tj|tm|az|ge|am|ir|iq|sy|lb|jo|ps|il|sa|ae|om|ye|kw|qa|bh|pk|af|bd|bt|np|lk|mv|mm|th|la|kh|vn|my|sg|bn|id|tl|ph|tw|hk|mo|mn|kp|kr|jp)' | head -1)
+        if [ -n "$isp" ]; then
+            echo "$isp"
+            return
+        fi
+    fi
+
+    # 优先级3：提取公司全名（仅当有有效AS号码时）
+    if echo "$line" | grep -q "AS[0-9]\+"; then
+        # 移除行号、IP地址、AS号码和方括号内容，保留后面的部分
+        local content=$(echo "$line" | sed 's/^[[:space:]]*[0-9]\+[[:space:]]\+[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}[[:space:]]\+AS[0-9]\+[[:space:]]*\(\[[^]]*\]\)*[[:space:]]*//')
+
+        # 如果内容为空或只是*，直接返回
+        if [ -z "$content" ] || [ "$content" = "*" ]; then
+            return
+        fi
+
+        # 移除地理信息，保留运营商名称
+        # 1. 移除域名及其前面的内容
+        local remaining=$(echo "$content" | sed 's/.*[a-zA-Z0-9.-]*\.[a-zA-Z]\{2,\}[[:space:]]*//')
+
+        # 2. 如果没有域名，尝试移除中文地理信息
+        if [ -z "$remaining" ] && contains_non_ascii "$content"; then
+            remaining=$(echo "$content" | sed 's/.*[^ -~][[:space:]]*//')
+        fi
+
+        # 3. 如果还是空，使用原内容但移除明显的地理词汇
+        if [ -z "$remaining" ]; then
+            remaining="$content"
+        fi
+
+        # 提取有效的运营商名称
+        if [ -n "$remaining" ]; then
+            # 清理空白字符
+            remaining=$(echo "$remaining" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+            # 验证是否为有效的运营商名称
+            if [ -n "$remaining" ] && [ ${#remaining} -gt 2 ] && [ "$remaining" != "*" ]; then
+                # 排除明显的无效内容（不硬编码国家名称）
+                if ! echo "$remaining" | grep -qE '^[0-9]+$|^RFC[0-9]+$|^AS\*?$|^\*+$'; then
+                    echo "$remaining"
+                fi
+            fi
+        fi
+    fi
+}
+
+# 专注于Route-Path格式解析 - 高质量、简洁的解析逻辑
+# Route-Path格式示例：
+# ╰AS6453 Tata Communication「Singapore『Singapore』」
+# ╰AS9299 Philippine Long Distance Telephone Co.「Philippines『Metro Manila』」
+
+# 检测并提取Route-Path数据块
+extract_route_path_block() {
+    local route_output="$1"
+
+    # 查找Route-Path数据的开始标记
+    # Route-Path通常在traceroute输出之后，以特殊字符开头
+    echo "$route_output" | awk '
+        /^[[:space:]]*[╰╭│]/ {
+            in_route_path = 1
+        }
+        in_route_path && /^[[:space:]]*[╰╭│]/ {
+            print $0
+        }
+        in_route_path && !/^[[:space:]]*[╰╭│]/ && NF > 0 {
+            # 如果遇到非Route-Path格式的非空行，停止
+            exit
+        }
+    '
+}
+
+# 从Route-Path格式提取地理信息
+extract_route_path_geo() {
+    local route_path_data="$1"
+
+    if [ -z "$route_path_data" ]; then
+        return
+    fi
+
+    # 提取「国家『城市』」格式的地理信息
+    echo "$route_path_data" | while IFS= read -r line; do
+        # 匹配「...『...』」格式
+        local geo=$(echo "$line" | grep -o '「[^」]*『[^』]*』」')
+        if [ -n "$geo" ]; then
+            # 转换格式：「国家『城市』」-> "国家 城市"
+            geo=$(echo "$geo" | sed 's/「//; s/』」//; s/『/ /')
+
+            # 去重相同的地理位置（如"Singapore Singapore" -> "Singapore"）
+            if echo "$geo" | grep -q '^[[:space:]]*\([^[:space:]]\+\)[[:space:]]\+\1[[:space:]]*$'; then
+                geo=$(echo "$geo" | awk '{print $1}')
+            fi
+
+            # 清理空白字符
+            geo=$(echo "$geo" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+            if [ -n "$geo" ] && [ "$geo" != " " ]; then
+                echo "$geo"
+            fi
+        fi
+    done | awk '!seen[$0]++'
+}
+
+# 从Route-Path格式提取运营商信息
+extract_route_path_isp() {
+    local route_path_data="$1"
+
+    if [ -z "$route_path_data" ]; then
+        return
+    fi
+
+    # 提取AS号码后到「之前的公司名称
+    echo "$route_path_data" | while IFS= read -r line; do
+        # 移除开头的特殊字符和AS号码
+        local isp=$(echo "$line" | sed 's/^[[:space:]]*[╰╭│][[:space:]]*//' | sed 's/^AS[0-9]\+[[:space:]]*//')
+
+        # 移除「...」部分，保留公司名称
+        isp=$(echo "$isp" | sed 's/「.*$//')
+
+        # 清理空白字符
+        isp=$(echo "$isp" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+        if [ -n "$isp" ] && [ ${#isp} -gt 2 ]; then
+            echo "$isp"
+        fi
+    done | awk '!seen[$0]++'
+}
+
+# 从Route-Path格式提取AS路径
+extract_route_path_as() {
+    local route_path_data="$1"
+
+    if [ -z "$route_path_data" ]; then
+        return
+    fi
+
+    # 提取AS号码
+    echo "$route_path_data" | while IFS= read -r line; do
+        local as_num=$(echo "$line" | grep -o 'AS[0-9]\+')
+        if [ -n "$as_num" ]; then
+            echo "$as_num"
+        fi
+    done | awk '!seen[$0]++'
+}
+
+# 高质量路由分析解析 - 专注于Route-Path格式，简洁可靠
 parse_route_summary() {
     local route_output="$1"
     local used_command="$2"
 
-    # 提取AS号序列
-    local as_numbers=$(echo "$route_output" | grep -oE "AS[0-9]+" | awk '!seen[$0]++' | head -6)
-    local as_path=""
-    if [ -n "$as_numbers" ]; then
-        local first=true
-        while IFS= read -r as_num; do
-            if [ -n "$as_num" ]; then
-                if [ "$first" = true ]; then
-                    as_path="$as_num"
-                    first=false
-                else
-                    as_path="$as_path > $as_num"
-                fi
-            fi
-        done <<< "$as_numbers"
-    fi
+    # 提取Route-Path数据块
+    local route_path_data=$(extract_route_path_block "$route_output")
 
-    # 提取运营商信息
-    local isp_path=""
-    local isp_list=""
+    # 初始化结果变量
+    local final_as_path=""
+    local final_isp_path=""
+    local final_geo_path=""
 
-    # 逐行处理，提取域名或公司名称
-    echo "$route_output" | grep "AS[0-9]" | grep -v "RFC1918" | while IFS= read -r line; do
-        local isp=""
-        # 先尝试提取域名
-        isp=$(echo "$line" | grep -oE "[a-zA-Z0-9.-]+\.(com|net|org|io|co)" | tail -1)
-        # 没有域名时提取公司名称，但排除常见的误提取
-        if [ -z "$isp" ]; then
-            local temp_isp=$(echo "$line" | grep -oE "[A-Z][A-Z ]+ [A-Z][A-Z ]*" | tail -1 | sed 's/ SRL$//; s/ LLC$//; s/ INC$//')
-            # 只有在行尾才认为是运营商名称，避免误提取
-            if echo "$line" | grep -qE "[A-Z][A-Z ]+ [A-Z][A-Z ]*[[:space:]]*$"; then
-                isp="$temp_isp"
-            fi
+    # 如果有Route-Path数据，专注解析它（高质量、可靠）
+    if [ -n "$route_path_data" ]; then
+        # 提取AS路径
+        local as_list=$(extract_route_path_as "$route_path_data")
+        if [ -n "$as_list" ]; then
+            final_as_path=$(echo "$as_list" | paste -sd '>' | sed 's/>/ > /g')
         fi
-        [ -n "$isp" ] && echo "$isp"
-    done | awk '!seen[$0]++' > /tmp/isp_list_$$
 
-    # 构建运营商路径字符串
-    if [ -f "/tmp/isp_list_$$" ]; then
-        isp_path=$(cat /tmp/isp_list_$$ | paste -sd '>' | sed 's/>/ > /g')
-        rm -f /tmp/isp_list_$$
-    fi
-
-    # 提取地理位置信息
-    local geo_path=""
-
-    # 逐行处理，提取地理位置
-    echo "$route_output" | grep "AS[0-9]" | grep -v "RFC1918" | while IFS= read -r line; do
-        # 多步骤清理，移除各种干扰信息
-        local geo=$(echo "$line" | \
-            sed 's/.*AS[0-9]*[[:space:]]*\(\[.*\]\)*[[:space:]]*//' | \
-            sed 's/[[:space:]]*[a-zA-Z0-9.-]*\.\(com\|net\|org\|io\|co\).*$//' | \
-            sed 's/[[:space:]]*[A-Z][A-Z ]* [A-Z][A-Z ]*.*$//' | \
-            sed 's/[[:space:]]*\[.*\][[:space:]]*//' | \
-            sed 's/「.*」//g' | \
-            sed 's/『.*』//g' | \
-            sed "s/'s Backbone.*$//" | \
-            sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | \
-            sed 's/[[:space:]]\+/ /g' | \
-            sed 's/[[:space:]]*$//')
-
-        # 通用过滤：有效地理位置信息
-        if [ -n "$geo" ] && [ "$geo" != "*" ] && [ ${#geo} -gt 2 ] && ! echo "$geo" | grep -qE "^[0-9]+$"; then
-            # 排除运营商名称和非地理信息
-            if ! echo "$geo" | grep -qE "^\[.*\]$|Backbone|backbone|BACKBONE|^[A-Z]+$|^Re[A-Z]+$|^[A-Z][a-z]*[A-Z]+$|Inc\.|LLC|SRL|, Inc"; then
-                # 包含非ASCII字符或标准地名格式
-                if echo "$geo" | grep -qE "[^\x00-\x7F]|^[A-Z][a-z]+ [A-Z][a-z]+|^[A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+"; then
-                    echo "$geo"
-                fi
-            fi
+        # 提取运营商路径
+        local isp_list=$(extract_route_path_isp "$route_path_data")
+        if [ -n "$isp_list" ]; then
+            final_isp_path=$(echo "$isp_list" | paste -sd '>' | sed 's/>/ > /g')
         fi
-    done | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\+/ /g' | awk '!seen[$0]++' > /tmp/geo_list_$$
 
-    # 构建地理路径字符串
-    if [ -f "/tmp/geo_list_$$" ]; then
-        geo_path=$(cat /tmp/geo_list_$$ | paste -sd '>' | sed 's/>/ > /g')
-        rm -f /tmp/geo_list_$$
+        # 提取地理路径
+        local geo_list=$(extract_route_path_geo "$route_path_data")
+        if [ -n "$geo_list" ]; then
+            final_geo_path=$(echo "$geo_list" | paste -sd '>' | sed 's/>/ > /g')
+        fi
+    else
+        # 如果没有Route-Path数据，使用优化的普通traceroute解析
+        local as_numbers=$(echo "$route_output" | grep -oE "AS[0-9]+" | awk '!seen[$0]++' | head -6)
+        if [ -n "$as_numbers" ]; then
+            local first=true
+            while IFS= read -r as_num; do
+                if [ -n "$as_num" ]; then
+                    if [ "$first" = true ]; then
+                        final_as_path="$as_num"
+                        first=false
+                    else
+                        final_as_path="$final_as_path > $as_num"
+                    fi
+                fi
+            done <<< "$as_numbers"
+        fi
+
+        # 提取运营商信息
+        echo "$route_output" | grep "AS[0-9]" | grep -v "RFC1918" | while IFS= read -r line; do
+            extract_isp_info "$line"
+        done | awk '!seen[$0]++' > /tmp/isp_list_$$
+
+        if [ -f "/tmp/isp_list_$$" ] && [ -s "/tmp/isp_list_$$" ]; then
+            final_isp_path=$(cat /tmp/isp_list_$$ | paste -sd '>' | sed 's/>/ > /g')
+            rm -f /tmp/isp_list_$$
+        fi
+
+        # 提取地理信息
+        echo "$route_output" | grep "AS[0-9]" | grep -v "RFC1918" | while IFS= read -r line; do
+            extract_geo_info "$line"
+        done | awk '!seen[$0]++' > /tmp/geo_list_$$
+
+        if [ -f "/tmp/geo_list_$$" ] && [ -s "/tmp/geo_list_$$" ]; then
+            final_geo_path=$(cat /tmp/geo_list_$$ | paste -sd '>' | sed 's/>/ > /g')
+            rm -f /tmp/geo_list_$$
+        fi
     fi
 
     # 提取地图链接
     local map_url=$(echo "$route_output" | grep -o "https://assets\.nxtrace\.org/tracemap/[^[:space:]]*\.html")
 
     # 收集路由分析数据
-    set_test_result "route_as_path" "$as_path"
-    set_test_result "route_isp_path" "$isp_path"
-    set_test_result "route_geo_path" "$geo_path"
+    set_test_result "route_as_path" "$final_as_path"
+    set_test_result "route_isp_path" "$final_isp_path"
+    set_test_result "route_geo_path" "$final_geo_path"
     set_test_result "route_map_url" "$map_url"
 
     # 输出总结
@@ -1214,9 +1424,9 @@ parse_route_summary() {
     echo ""
 
     [ -n "$used_command" ] && echo -e "${YELLOW}使用指令:${NC} ${used_command}"
-    [ -n "$as_path" ] && echo -e "${BLUE}🌐 AS路径:${NC} ${as_path}"
-    [ -n "$isp_path" ] && echo -e "${BLUE}🏢 运营商路径:${NC} ${isp_path}"
-    [ -n "$geo_path" ] && echo -e "${BLUE}🌍 地理路径:${NC} ${geo_path}"
+    [ -n "$final_as_path" ] && echo -e "${BLUE}🌐 AS路径:${NC} ${final_as_path}"
+    [ -n "$final_isp_path" ] && echo -e "${BLUE}🏢 运营商路径:${NC} ${final_isp_path}"
+    [ -n "$final_geo_path" ] && echo -e "${BLUE}🌍 地理路径:${NC} ${final_geo_path}"
     [ -n "$map_url" ] && echo -e "${BLUE}🗺️  地图展示:${NC} ${map_url}"
     echo ""
 }
@@ -1345,7 +1555,11 @@ generate_final_report() {
     echo -e "${BLUE}🌐 网络性能测试报告${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
     echo -e "  源: 中转机 (本机)"
-    echo -e "  目标: $TARGET_IP:$TARGET_PORT"
+
+    # 隐藏完整IP地址，只显示前两段
+    local masked_ip=$(echo "$TARGET_IP" | awk -F'.' '{print $1"."$2".*.*"}')
+    echo -e "  目标: $masked_ip:$TARGET_PORT"
+
     echo -e "  测试方向: 中转机 ↔ 落地机 "
     echo -e "  单项测试时长: ${TEST_DURATION}秒"
     echo ""
