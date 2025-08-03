@@ -1104,7 +1104,7 @@ run_udp_download_test() {
     echo ""
 }
 
-# 检测IP版本
+# 检测IP地址版本
 detect_ip_version() {
     local ip="$1"
     if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
@@ -1116,10 +1116,9 @@ detect_ip_version() {
     fi
 }
 
-# 检测是否包含非ASCII字符（中文等）
+# 检测文本是否包含非ASCII字符
 contains_non_ascii() {
     local text="$1"
-    # 使用LC_ALL=C来确保正确的字符检测，避免grep错误
     if LC_ALL=C echo "$text" | grep -q '[^ -~]'; then
         return 0
     else
@@ -1127,42 +1126,29 @@ contains_non_ascii() {
     fi
 }
 
-# 提取地理信息
+# 从nexttrace输出行中提取地理位置信息
 extract_geo_info() {
     local line="$1"
 
-    # 精确匹配nexttrace输出格式：行号 + IP地址 + AS号码 + [可选标签] + 地理信息 + 运营商信息
-    # 使用更精确的IPv4地址匹配：[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+    # 移除行号、IP地址、AS号码等前缀，保留地理信息部分
     local content=$(echo "$line" | sed 's/^[[:space:]]*[0-9]\+[[:space:]]\+[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}[[:space:]]\+AS[0-9]\+[[:space:]]*\(\[[^]]*\]\)*[[:space:]]*//')
 
-    # 如果内容为空或只是*，直接返回
     if [ -z "$content" ] || [ "$content" = "*" ]; then
         return
     fi
 
-    # 移除行尾的运营商信息（域名、公司名称、标识符等）
     local geo_part="$content"
 
-    # 1. 移除域名及其后的所有内容
+    # 移除域名和运营商标识，保留地理信息
     geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*[a-zA-Z0-9.-]*\.[a-zA-Z]\{2,\}.*$//')
-
-    # 2. 移除行尾的全大写单词（如 "电信"）
     geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*[A-Z]\+[[:space:]]*$//')
 
-    # 3. 移除行尾的单个大写字母或数字组合
     geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*[A-Z0-9]\+[[:space:]]*$//')
-
-    # 4. 移除特殊标记（如方括号内容）
     geo_part=$(echo "$geo_part" | sed 's/[[:space:]]*\[.*\][[:space:]]*$//')
-
-    # 5. 清理多余的空白字符
     geo_part=$(echo "$geo_part" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\+/ /g')
 
-    # 验证地理信息的有效性
     if [ -n "$geo_part" ] && [ "$geo_part" != "*" ] && [ ${#geo_part} -gt 2 ]; then
-        # 排除明显的非地理信息
         if ! echo "$geo_part" | grep -qE '^[0-9]+$|^RFC[0-9]+$|^[A-Z]+$|^[a-z]+$'; then
-            # 确保包含有意义的地理信息（中文字符或多个单词）
             if contains_non_ascii "$geo_part" || echo "$geo_part" | grep -q '[[:space:]]'; then
                 echo "$geo_part"
             fi
@@ -1170,30 +1156,29 @@ extract_geo_info() {
     fi
 }
 
-# 提取运营商信息 - 优先标签，统一格式
+# 从nexttrace输出行中提取运营商信息
 extract_isp_info() {
     local line="$1"
     local isp=""
 
-    # 预检查：跳过无效行
-    # 1. 跳过RFC1918私有地址行
+    # 跳过私有地址行
     if echo "$line" | grep -q "RFC1918"; then
         return
     fi
 
-    # 2. 必须包含AS号码或方括号标签，否则跳过
+    # 必须包含AS号码或方括号标签
     if ! echo "$line" | grep -qE "AS[0-9]+|\[[^]]+\]"; then
         return
     fi
 
-    # 优先级1：提取方括号中的标签（如[CHINANET-GD]、[CN2-Global]）
+    # 优先级1：提取方括号中的标签（如[CHINANET-GD]）
     isp=$(echo "$line" | grep -o '\[[^]]*\]' | sed 's/\[//; s/\]//' | head -1)
     if [ -n "$isp" ] && [ ${#isp} -gt 2 ]; then
         echo "$isp"
         return
     fi
 
-    # 优先级2：提取域名（仅当有有效AS号码时）
+    # 优先级2：提取域名
     if echo "$line" | grep -q "AS[0-9]\+"; then
         isp=$(echo "$line" | grep -oE '[a-zA-Z0-9.-]+\.(com|net|org|io|co|in|cn|uk|de|fr|jp|kr|au|ca|ru|br|mx|it|es|nl|se|no|dk|fi|pl|cz|hu|ro|bg|hr|si|sk|ee|lv|lt|mt|cy|lu|be|at|ch|li|mc|sm|va|ad|gi|im|je|gg|fo|gl|is|tr|gr|mk|al|ba|rs|me|xk|md|ua|by|kz|uz|kg|tj|tm|az|ge|am|ir|iq|sy|lb|jo|ps|il|sa|ae|om|ye|kw|qa|bh|pk|af|bd|bt|np|lk|mv|mm|th|la|kh|vn|my|sg|bn|id|tl|ph|tw|hk|mo|mn|kp|kr|jp)' | head -1)
         if [ -n "$isp" ]; then
@@ -1202,38 +1187,29 @@ extract_isp_info() {
         fi
     fi
 
-    # 优先级3：提取公司全名（仅当有有效AS号码时）
+    # 优先级3：提取公司名称
     if echo "$line" | grep -q "AS[0-9]\+"; then
-        # 移除行号、IP地址、AS号码和方括号内容，保留后面的部分
         local content=$(echo "$line" | sed 's/^[[:space:]]*[0-9]\+[[:space:]]\+[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}[[:space:]]\+AS[0-9]\+[[:space:]]*\(\[[^]]*\]\)*[[:space:]]*//')
 
-        # 如果内容为空或只是*，直接返回
         if [ -z "$content" ] || [ "$content" = "*" ]; then
             return
         fi
 
-        # 移除地理信息，保留运营商名称
-        # 1. 移除域名及其前面的内容
+        # 分离地理信息和运营商信息
         local remaining=$(echo "$content" | sed 's/.*[a-zA-Z0-9.-]*\.[a-zA-Z]\{2,\}[[:space:]]*//')
 
-        # 2. 如果没有域名，尝试移除中文地理信息
         if [ -z "$remaining" ] && contains_non_ascii "$content"; then
             remaining=$(echo "$content" | sed 's/.*[^ -~][[:space:]]*//')
         fi
 
-        # 3. 如果还是空，使用原内容但移除明显的地理词汇
         if [ -z "$remaining" ]; then
             remaining="$content"
         fi
 
-        # 提取有效的运营商名称
         if [ -n "$remaining" ]; then
-            # 清理空白字符
             remaining=$(echo "$remaining" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
-            # 验证是否为有效的运营商名称
             if [ -n "$remaining" ] && [ ${#remaining} -gt 2 ] && [ "$remaining" != "*" ]; then
-                # 排除明显的无效内容（不硬编码国家名称）
                 if ! echo "$remaining" | grep -qE '^[0-9]+$|^RFC[0-9]+$|^AS\*?$|^\*+$'; then
                     echo "$remaining"
                 fi
@@ -1242,17 +1218,10 @@ extract_isp_info() {
     fi
 }
 
-# 专注于Route-Path格式解析 - 高质量、简洁的解析逻辑
-# Route-Path格式示例：
-# ╰AS6453 Tata Communication「Singapore『Singapore』」
-# ╰AS9299 Philippine Long Distance Telephone Co.「Philippines『Metro Manila』」
-
-# 检测并提取Route-Path数据块
 extract_route_path_block() {
     local route_output="$1"
 
-    # 查找Route-Path数据的开始标记
-    # Route-Path通常在traceroute输出之后，以特殊字符开头
+    # 查找Route-Path数据块
     echo "$route_output" | awk '
         /^[[:space:]]*[╰╭│]/ {
             in_route_path = 1
@@ -1261,13 +1230,12 @@ extract_route_path_block() {
             print $0
         }
         in_route_path && !/^[[:space:]]*[╰╭│]/ && NF > 0 {
-            # 如果遇到非Route-Path格式的非空行，停止
             exit
         }
     '
 }
 
-# 从Route-Path格式提取地理信息
+# 从Route-Path数据中提取地理信息
 extract_route_path_geo() {
     local route_path_data="$1"
 
@@ -1277,18 +1245,16 @@ extract_route_path_geo() {
 
     # 提取「国家『城市』」格式的地理信息
     echo "$route_path_data" | while IFS= read -r line; do
-        # 匹配「...『...』」格式
         local geo=$(echo "$line" | grep -o '「[^」]*『[^』]*』」')
         if [ -n "$geo" ]; then
-            # 转换格式：「国家『城市』」-> "国家 城市"
+            # 转换为"国家 城市"格式
             geo=$(echo "$geo" | sed 's/「//; s/』」//; s/『/ /')
 
-            # 去重相同的地理位置（如"Singapore Singapore" -> "Singapore"）
+            # 去重相同地名（如Singapore Singapore -> Singapore）
             if echo "$geo" | grep -q '^[[:space:]]*\([^[:space:]]\+\)[[:space:]]\+\1[[:space:]]*$'; then
                 geo=$(echo "$geo" | awk '{print $1}')
             fi
 
-            # 清理空白字符
             geo=$(echo "$geo" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
             if [ -n "$geo" ] && [ "$geo" != " " ]; then
@@ -1298,7 +1264,7 @@ extract_route_path_geo() {
     done | awk '!seen[$0]++'
 }
 
-# 从Route-Path格式提取运营商信息
+# 从Route-Path数据中提取运营商信息
 extract_route_path_isp() {
     local route_path_data="$1"
 
@@ -1306,15 +1272,10 @@ extract_route_path_isp() {
         return
     fi
 
-    # 提取AS号码后到「之前的公司名称
     echo "$route_path_data" | while IFS= read -r line; do
-        # 移除开头的特殊字符和AS号码
+        # 提取AS号码后到「之前的公司名称
         local isp=$(echo "$line" | sed 's/^[[:space:]]*[╰╭│][[:space:]]*//' | sed 's/^AS[0-9]\+[[:space:]]*//')
-
-        # 移除「...」部分，保留公司名称
         isp=$(echo "$isp" | sed 's/「.*$//')
-
-        # 清理空白字符
         isp=$(echo "$isp" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
         if [ -n "$isp" ] && [ ${#isp} -gt 2 ]; then
@@ -1323,7 +1284,7 @@ extract_route_path_isp() {
     done | awk '!seen[$0]++'
 }
 
-# 从Route-Path格式提取AS路径
+# 从Route-Path数据中提取AS路径
 extract_route_path_as() {
     local route_path_data="$1"
 
@@ -1331,7 +1292,6 @@ extract_route_path_as() {
         return
     fi
 
-    # 提取AS号码
     echo "$route_path_data" | while IFS= read -r line; do
         local as_num=$(echo "$line" | grep -o 'AS[0-9]\+')
         if [ -n "$as_num" ]; then
@@ -1340,20 +1300,18 @@ extract_route_path_as() {
     done | awk '!seen[$0]++'
 }
 
-# 高质量路由分析解析 - 专注于Route-Path格式，简洁可靠
+# 解析路由分析结果
 parse_route_summary() {
     local route_output="$1"
     local used_command="$2"
 
     # 提取Route-Path数据块
     local route_path_data=$(extract_route_path_block "$route_output")
-
-    # 初始化结果变量
     local final_as_path=""
     local final_isp_path=""
     local final_geo_path=""
 
-    # 如果有Route-Path数据，专注解析它（高质量、可靠）
+    # 优先使用Route-Path数据
     if [ -n "$route_path_data" ]; then
         # 提取AS路径
         local as_list=$(extract_route_path_as "$route_path_data")
@@ -1373,7 +1331,7 @@ parse_route_summary() {
             final_geo_path=$(echo "$geo_list" | paste -sd '>' | sed 's/>/ > /g')
         fi
     else
-        # 如果没有Route-Path数据，使用优化的普通traceroute解析
+        # 回退到普通traceroute解析
         local as_numbers=$(echo "$route_output" | grep -oE "AS[0-9]+" | awk '!seen[$0]++' | head -6)
         if [ -n "$as_numbers" ]; then
             local first=true
@@ -1389,7 +1347,6 @@ parse_route_summary() {
             done <<< "$as_numbers"
         fi
 
-        # 提取运营商信息
         echo "$route_output" | grep "AS[0-9]" | grep -v "RFC1918" | while IFS= read -r line; do
             extract_isp_info "$line"
         done | awk '!seen[$0]++' > /tmp/isp_list_$$
@@ -1945,9 +1902,66 @@ show_main_menu() {
     done
 }
 
+
+
+# 自动更新脚本 (由xwPF.sh调用时执行)
+auto_update_script() {
+    # 获取当前脚本路径
+    local current_script="$0"
+
+    # 检查是否为系统安装的脚本路径
+    if [[ "$current_script" == "/etc/realm/speedtest.sh" ]]; then
+        echo -e "${GREEN}✓ 检测到系统已安装脚本，正在更新...${NC}"
+
+        # 自动从GitHub下载最新版本覆盖更新
+        echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
+
+        local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
+        local download_success=false
+        local sources=(
+            ""  # 官方源
+            "https://proxy.vvvv.ee/"
+            "https://demo.52013120.xyz/"
+            "https://ghfast.top/"
+        )
+
+        for proxy in "${sources[@]}"; do
+            local full_url="${proxy}${script_url}"
+            local source_name
+
+            if [ -z "$proxy" ]; then
+                source_name="GitHub官方源"
+            else
+                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+            fi
+
+            echo -e "${BLUE}尝试 $source_name${NC}"
+
+            if curl -fsSL "$full_url" -o "$current_script" 2>/dev/null; then
+                chmod +x "$current_script"
+                echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
+                download_success=true
+                break
+            else
+                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+            fi
+        done
+
+        if [ "$download_success" = false ]; then
+            echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
+            echo -e "${BLUE}使用现有脚本版本${NC}"
+        fi
+    fi
+
+    echo ""
+}
+
 # 主函数
 main() {
     check_root
+
+    # 自动更新脚本 (仅在系统安装路径下执行)
+    auto_update_script
 
     # 检测工具状态并安装缺失的工具
     install_required_tools
