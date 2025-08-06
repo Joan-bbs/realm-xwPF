@@ -3852,6 +3852,18 @@ install_realm_from_local_package() {
     local realm_binary=$(find "$temp_dir" -name "realm" -type f -executable 2>/dev/null | head -1)
 
     if [ -n "$realm_binary" ] && [ -f "$realm_binary" ]; then
+        # 检查并停止正在运行的realm服务
+        if systemctl is-active realm >/dev/null 2>&1; then
+            echo -e "${BLUE}检测到realm服务正在运行，正在停止服务...${NC}"
+            if systemctl stop realm >/dev/null 2>&1; then
+                echo -e "${GREEN}✓ realm服务已停止${NC}"
+            else
+                echo -e "${RED}✗ 停止realm服务失败，无法安全更新${NC}"
+                rm -rf "$temp_dir"
+                return 1
+            fi
+        fi
+
         # 复制到目标位置
         if cp "$realm_binary" "$REALM_PATH" && chmod +x "$REALM_PATH"; then
             echo -e "${GREEN}✓ realm 安装成功${NC}"
@@ -4093,6 +4105,17 @@ install_realm() {
 
     # 解压安装
     echo -e "${YELLOW}正在解压安装...${NC}"
+
+    # 检查并停止正在运行的realm服务
+    if systemctl is-active realm >/dev/null 2>&1; then
+        echo -e "${BLUE}检测到realm服务正在运行，正在停止服务...${NC}"
+        if systemctl stop realm >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ realm服务已停止${NC}"
+        else
+            echo -e "${RED}✗ 停止realm服务失败，无法安全更新${NC}"
+            return 1
+        fi
+    fi
 
     # 解压安装
     local work_dir=$(dirname "$download_file")
