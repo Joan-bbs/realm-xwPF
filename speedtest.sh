@@ -18,6 +18,9 @@ TARGET_PORT="5201"
 TEST_DURATION="30"
 ROLE=""
 
+# 全局User-Agent
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 # 全局测试结果数据结构
 declare -A TEST_RESULTS=(
     # 延迟测试结果
@@ -101,9 +104,7 @@ check_root() {
 # 工具配置数组 - 定义所有需要的工具
 declare -A REQUIRED_TOOLS=(
     ["iperf3"]="apt:iperf3"
-    ["fping"]="apt:fping"
     ["hping3"]="apt:hping3"
-    ["jq"]="apt:jq"
     ["bc"]="apt:bc"
     ["nexttrace"]="custom:nexttrace"
     ["nc"]="apt:netcat-openbsd"
@@ -497,10 +498,10 @@ run_latency_tests() {
 
         # 后台执行测试，前台显示进度条
         local temp_result=$(mktemp)
-        (hping3 -c 20 -i 1 -S -p "$TARGET_PORT" "$TARGET_IP" > "$temp_result" 2>&1) &
+        (hping3 -c "$TEST_DURATION" -i 1 -S -p "$TARGET_PORT" "$TARGET_IP" > "$temp_result" 2>&1) &
         local test_pid=$!
 
-        show_progress_bar "20" "TCP延迟测试"
+        show_progress_bar "$TEST_DURATION" "TCP延迟测试"
 
         # 等待测试完成
         wait $test_pid
@@ -549,7 +550,7 @@ run_latency_tests() {
                 # 验证提取结果
                 if [ -n "$min_delay" ] && [ -n "$avg_delay" ] && [ -n "$max_delay" ]; then
                     echo -e "${GREEN}TCP应用层延迟测试完成${NC}"
-                    echo -e "使用指令: ${YELLOW}hping3 -c 20 -i 1 -S -p $TARGET_PORT $TARGET_IP${NC}"
+                    echo -e "使用指令: ${YELLOW}hping3 -c $TEST_DURATION -i 1 -S -p $TARGET_PORT $TARGET_IP${NC}"
                     echo ""
                     echo -e "${BLUE}📊 测试结果${NC}"
                     echo ""
@@ -571,21 +572,17 @@ run_latency_tests() {
                     set_test_result "packet_sent" "$transmitted"
                     set_test_result "packet_received" "$received"
 
-                    FPING_SUCCESS=true
                     HPING_SUCCESS=true
                 else
                     echo -e "${RED}❌ 数据提取失败${NC}"
-                    FPING_SUCCESS=false
                     HPING_SUCCESS=false
                 fi
             else
                 echo -e "${RED}❌ 未找到统计行${NC}"
-                FPING_SUCCESS=false
                 HPING_SUCCESS=false
             fi
         else
             echo -e "${RED}❌ 测试执行失败 (可能需要管理员权限)${NC}"
-            FPING_SUCCESS=false
             HPING_SUCCESS=false
         fi
 
@@ -593,7 +590,6 @@ run_latency_tests() {
         echo ""
     else
         echo -e "${YELLOW}⚠️  hping3工具不可用，跳过TCP延迟测试${NC}"
-        FPING_SUCCESS=false
         HPING_SUCCESS=false
     fi
 }
@@ -1408,8 +1404,8 @@ run_route_analysis() {
             nexttrace_cmd="$nexttrace_cmd --ipv6"
         fi
 
-        # 添加其他优化参数 (使用ICMP模式，更容易通过防火墙)
-        nexttrace_cmd="$nexttrace_cmd --route-path --queries 3 --max-hops 25"
+        # 添加其他优化参数 (使用TCP模式，发送1024字节大包数据)
+        nexttrace_cmd="$nexttrace_cmd --tcp --port $TARGET_PORT --psize 1024 --route-path --queries 3 --max-hops 25"
 
         echo ""
 
@@ -1440,7 +1436,7 @@ run_route_analysis() {
                 echo ""
 
                 # 解析路由信息
-                parse_route_summary "$basic_output" "nexttrace $TARGET_IP"
+                parse_route_summary "$basic_output" "nexttrace --ipv4 --tcp --port $TARGET_PORT $TARGET_IP"
 
                 ROUTE_SUCCESS=true
             else
@@ -1455,10 +1451,296 @@ run_route_analysis() {
     echo ""
 }
 
+# BGP对等关系分析
+run_bgp_analysis() {
+    echo -e "${GREEN}🟢 BGP对等关系分析${NC}"
 
+    local public_ip=$(get_public_ip)
+    if [ -z "$public_ip" ]; then
+        echo -e "${YELLOW}⚠️  无法获取公网IP，跳过BGP分析${NC}"
+        echo ""
+        return
+    fi
+
+    # 通过IP获取ASN信息
+    local ipinfo_result=$(curl -s --connect-timeout 15 -A "$USER_AGENT" "https://ipinfo.io/$public_ip/json" 2>/dev/null)
+    if [ -z "$ipinfo_result" ]; then
+        echo -e "${YELLOW}⚠️  无法获取IP信息，跳过BGP分析${NC}"
+        echo ""
+        return
+    fi
+
+    # 提取ASN号码和组织名称
+    local org_field=$(echo "$ipinfo_result" | grep '"org"' | sed 's/.*"org": *"\([^"]*\)".*/\1/')
+    if [ -z "$org_field" ]; then
+        # 备用方案：使用awk解析
+        org_field=$(echo "$ipinfo_result" | awk -F'"' '/org/ {print $4}')
+    fi
+    local asn=$(echo "$org_field" | grep -o 'AS[0-9][0-9]*' | sed 's/AS//')
+    local org_name=$(echo "$org_field" | sed 's/AS[0-9][0-9]* *//')
+
+    if [ -z "$asn" ]; then
+        echo -e "${YELLOW}⚠️  无法解析ASN信息，跳过BGP分析${NC}"
+        echo ""
+        return
+    fi
+
+    # 获取AS页面内容
+    local as_page=$(curl -s --connect-timeout 20 -A "$USER_AGENT" "https://bgp.tools/as/$asn" 2>/dev/null)
+    if [ -z "$as_page" ]; then
+        echo -e "${YELLOW}⚠️  无法获取AS页面信息${NC}"
+        echo ""
+        return
+    fi
+
+    # 提取policy hash值
+    local policy_hash=$(echo "$as_page" | grep -o '<option selected value="[^"]*"' | sed 's/<option selected value="//; s/"//')
+    if [ -z "$policy_hash" ]; then
+        policy_hash=$(echo "$as_page" | grep -o '<option value="[^"]*"' | grep -v 'disabled-default' | head -1 | sed 's/<option value="//; s/"//')
+    fi
+
+    local pathimg_url=""
+    if [ -n "$policy_hash" ]; then
+        pathimg_url="/pathimg/$asn-$policy_hash"
+    fi
+
+    # 获取SVG图片数据
+    local svg_data=""
+    local all_asn_data=""
+    local total_asn_count=0
+
+    if [ -n "$pathimg_url" ]; then
+        svg_data=$(curl -s --connect-timeout 20 -A "$USER_AGENT" "https://bgp.tools$pathimg_url" 2>/dev/null)
+
+        if [ -n "$svg_data" ]; then
+            # 解析SVG节点数据
+            local temp_asn_data=$(echo "$svg_data" | sed -n '/<g id="node[0-9]*" class="node">/,/<\/g>/p' | while IFS= read -r line; do
+                if echo "$line" | grep -q '<title>AS[0-9]*</title>'; then
+                    local node_asn=$(echo "$line" | grep -o 'AS[0-9]*' | sed 's/AS//')
+                    local stroke_color=""
+                    local short_name=""
+
+                    while IFS= read -r next_line; do
+                        if echo "$next_line" | grep -q 'stroke=' && [ -z "$stroke_color" ]; then
+                            if echo "$next_line" | grep -q 'stroke="limegreen"'; then
+                                stroke_color="origin"
+                            elif echo "$next_line" | grep -q 'stroke="#005ea5"'; then
+                                stroke_color="tier1"
+                            elif echo "$next_line" | grep -q 'stroke="black"'; then
+                                stroke_color="other"
+                            else
+                                stroke_color="unknown"
+                            fi
+                        fi
+
+                        if echo "$next_line" | grep -q 'font-size="10.00"' && [ -z "$short_name" ]; then
+                            short_name=$(echo "$next_line" | sed 's/.*>\([^<]*\)<.*/\1/')
+                        fi
+
+                        if [ -n "$stroke_color" ] && [ -n "$short_name" ]; then
+                            echo "$node_asn|$short_name|$stroke_color"
+                            break
+                        elif echo "$next_line" | grep -q '</g>'; then
+                            [ -z "$short_name" ] && short_name="Unknown"
+                            [ -z "$stroke_color" ] && stroke_color="unknown"
+                            echo "$node_asn|$short_name|$stroke_color"
+                            break
+                        fi
+                    done
+                fi
+            done)
+
+            # 按类型排序：本机 → 其他 → Tier1
+            local origin_data=$(echo "$temp_asn_data" | grep "|origin$")
+            local other_data=$(echo "$temp_asn_data" | grep "|other$")
+            local tier1_data=$(echo "$temp_asn_data" | grep "|tier1$")
+            local unknown_data=$(echo "$temp_asn_data" | grep "|unknown$")
+
+            all_asn_data=$(echo -e "$origin_data\n$other_data\n$tier1_data\n$unknown_data" | grep -v '^$')
+            total_asn_count=$(echo "$all_asn_data" | grep -c '^' 2>/dev/null || echo 0)
+        fi
+    fi
+
+    # 备用方案
+    if [ "$total_asn_count" -eq 0 ]; then
+        local short_org=$(echo "$org_name" | awk '{print $1}' | cut -c1-8)
+        all_asn_data="$asn|$short_org|origin"
+        total_asn_count=1
+    fi
+
+    # 保存结果
+    BGP_ASN_DATA="$all_asn_data"
+    BGP_TOTAL_COUNT="$total_asn_count"
+    BGP_PATHIMG_URL="$pathimg_url"
+    BGP_SUCCESS=true
+
+    # 显示BGP分析结果
+    echo ""
+    echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
+    echo -e "                    ${GREEN}🌐 BGP对等关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
+    echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
+
+    # 显示BGP网络拓扑
+    if [ -n "$all_asn_data" ] && [ "$total_asn_count" -gt 0 ]; then
+        local per_row=7
+        local total_rows=$(((total_asn_count + per_row - 1) / per_row))
+
+        for ((row=0; row<total_rows; row++)); do
+            local start_idx=$((row * per_row + 1))
+            local end_idx=$((start_idx + per_row - 1))
+            [ $end_idx -gt $total_asn_count ] && end_idx=$total_asn_count
+
+            # ASN行
+            for ((i=start_idx; i<=end_idx; i++)); do
+                local current_line=$(echo "$all_asn_data" | sed -n "${i}p")
+                local current_asn=$(echo "$current_line" | cut -d'|' -f1)
+                local current_color=$(echo "$current_line" | cut -d'|' -f3)
+
+                if [ $i -ne $start_idx ]; then
+                    printf "│"
+                fi
+
+                case "$current_color" in
+                    "origin") printf "${GREEN}%-9s${NC}" "AS$current_asn" ;;
+                    "tier1") printf "${BLUE}%-9s${NC}" "AS$current_asn" ;;
+                    "other") printf "${WHITE}%-9s${NC}" "AS$current_asn" ;;
+                    *) printf "${YELLOW}%-9s${NC}" "AS$current_asn" ;;
+                esac
+            done
+            echo ""
+
+            # 组织名称行
+            for ((i=start_idx; i<=end_idx; i++)); do
+                local current_line=$(echo "$all_asn_data" | sed -n "${i}p")
+                local current_name=$(echo "$current_line" | cut -d'|' -f2)
+                local current_color=$(echo "$current_line" | cut -d'|' -f3)
+
+                local display_name="$current_name"
+                if [ ${#display_name} -gt 8 ]; then
+                    display_name="${display_name:0:7}+"
+                fi
+
+                if [ $i -ne $start_idx ]; then
+                    printf "│"
+                fi
+
+                case "$current_color" in
+                    "origin") printf "${GREEN}%-9s${NC}" "$display_name" ;;
+                    "tier1") printf "${BLUE}%-9s${NC}" "$display_name" ;;
+                    "other") printf "${WHITE}%-9s${NC}" "$display_name" ;;
+                    *) printf "${YELLOW}%-9s${NC}" "$display_name" ;;
+                esac
+            done
+            echo ""
+
+            if [ $row -lt $((total_rows - 1)) ]; then
+                echo ""
+            fi
+        done
+    else
+        echo "暂无BGP连接数据"
+    fi
+
+    # 显示图片链接
+    if [ -n "$pathimg_url" ]; then
+        echo -e " ${BLUE}🛜 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
+        echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
+    fi
+
+    echo ""
+}
+
+# 生成BGP报告
+generate_bgp_report() {
+    # 检查分析结果
+    if [ "$BGP_SUCCESS" != true ]; then
+        echo -e "${WHITE}🌐 BGP对等关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
+        echo -e "─────────────────────────────────────────────────────────────────"
+        echo -e " ${RED}BGP分析失败或数据不可用${NC}"
+        echo -e "─────────────────────────────────────────────────────────────────"
+        return
+    fi
+
+    # 使用已保存的结果
+    local all_asn_data="$BGP_ASN_DATA"
+    local total_asn_count="$BGP_TOTAL_COUNT"
+    local pathimg_url="$BGP_PATHIMG_URL"
+
+    # 显示BGP分析结果
+    echo -e "${WHITE}🌐 BGP对等关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
+    echo -e "─────────────────────────────────────────────────────────────────"
+
+    # 显示BGP网络拓扑
+    if [ -n "$all_asn_data" ] && [ "$total_asn_count" -gt 0 ]; then
+        local per_row=7
+        local total_rows=$(((total_asn_count + per_row - 1) / per_row))
+
+        for ((row=0; row<total_rows; row++)); do
+            local start_idx=$((row * per_row + 1))
+            local end_idx=$((start_idx + per_row - 1))
+            [ $end_idx -gt $total_asn_count ] && end_idx=$total_asn_count
+
+            # ASN行
+            for ((i=start_idx; i<=end_idx; i++)); do
+                local current_line=$(echo "$all_asn_data" | sed -n "${i}p")
+                local current_asn=$(echo "$current_line" | cut -d'|' -f1)
+                local current_color=$(echo "$current_line" | cut -d'|' -f3)
+
+                if [ $i -ne $start_idx ]; then
+                    printf "│"
+                fi
+
+                case "$current_color" in
+                    "origin") printf "${GREEN}%-9s${NC}" "AS$current_asn" ;;
+                    "tier1") printf "${BLUE}%-9s${NC}" "AS$current_asn" ;;
+                    "other") printf "${WHITE}%-9s${NC}" "AS$current_asn" ;;
+                    *) printf "${YELLOW}%-9s${NC}" "AS$current_asn" ;;
+                esac
+            done
+            echo ""
+
+            # 组织名称行
+            for ((i=start_idx; i<=end_idx; i++)); do
+                local current_line=$(echo "$all_asn_data" | sed -n "${i}p")
+                local current_name=$(echo "$current_line" | cut -d'|' -f2)
+                local current_color=$(echo "$current_line" | cut -d'|' -f3)
+
+                local display_name="$current_name"
+                if [ ${#display_name} -gt 8 ]; then
+                    display_name="${display_name:0:7}+"
+                fi
+
+                if [ $i -ne $start_idx ]; then
+                    printf "│"
+                fi
+
+                case "$current_color" in
+                    "origin") printf "${GREEN}%-9s${NC}" "$display_name" ;;
+                    "tier1") printf "${BLUE}%-9s${NC}" "$display_name" ;;
+                    "other") printf "${WHITE}%-9s${NC}" "$display_name" ;;
+                    *) printf "${YELLOW}%-9s${NC}" "$display_name" ;;
+                esac
+            done
+            echo ""
+
+            if [ $row -lt $((total_rows - 1)) ]; then
+                echo ""
+            fi
+        done
+    else
+        echo "暂无BGP连接数据"
+    fi
+
+    echo -e "─────────────────────────────────────────────────────────────────"
+
+    # 显示图片链接
+    if [ -n "$pathimg_url" ]; then
+        echo -e " ${BLUE}🛜 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
+        echo -e "─────────────────────────────────────────────────────────────────"
+    fi
+}
 
 # 全局测试结果变量
-FPING_SUCCESS=false
 HPING_SUCCESS=false
 TCP_SINGLE_SUCCESS=false
 TCP_DOWNLOAD_SUCCESS=false
@@ -1466,6 +1748,13 @@ TCP_SUCCESS=false
 UDP_SINGLE_SUCCESS=false
 UDP_DOWNLOAD_SUCCESS=false
 ROUTE_SUCCESS=false
+BGP_SUCCESS=false
+
+# BGP分析结果变量
+BGP_ASN_DATA=""
+BGP_TOTAL_COUNT=0
+BGP_PATHIMG_URL=""
+
 
 # 主要性能测试函数
 run_performance_tests() {
@@ -1478,7 +1767,6 @@ run_performance_tests() {
     init_test_results
 
     # 重置测试结果
-    FPING_SUCCESS=false
     HPING_SUCCESS=false
     TCP_SINGLE_SUCCESS=false
     TCP_DOWNLOAD_SUCCESS=false
@@ -1486,11 +1774,14 @@ run_performance_tests() {
     UDP_SINGLE_SUCCESS=false
     UDP_DOWNLOAD_SUCCESS=false
     ROUTE_SUCCESS=false
+    BGP_SUCCESS=false
+
 
     # 执行各项测试
     run_latency_tests
     run_bandwidth_tests
     run_route_analysis
+    run_bgp_analysis
 
     # 设置TCP总体成功状态
     if [ "$TCP_SINGLE_SUCCESS" = true ] || [ "$TCP_DOWNLOAD_SUCCESS" = true ]; then
@@ -1505,7 +1796,7 @@ run_performance_tests() {
 generate_final_report() {
     echo ""
     echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e "${GREEN}🏆 网络性能测试完成${NC}"
+    echo -e "${GREEN}🏆 网络链路测试功能完成${NC}"
     echo ""
 
     # 报告标题
@@ -1522,7 +1813,7 @@ generate_final_report() {
     echo ""
 
     # 路由分析结果
-    echo -e "${WHITE}🗺️ 路由路径分析${NC}"
+    echo -e "${WHITE}🗺️ TCP大包路由路径分析${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
 
     if [ "$ROUTE_SUCCESS" = true ]; then
@@ -1533,7 +1824,10 @@ generate_final_report() {
     else
         echo -e " ${RED}路由分析失败或数据不可用${NC}"
     fi
-    echo ""
+    echo -e "─────────────────────────────────────────────────────────────────"
+
+    # BGP对等关系分析结果
+    generate_bgp_report
 
     # 核心性能数据展示
     echo -e "    ${WHITE}PING & 抖动${NC}           ${WHITE}⬆️ 上行带宽${NC}           ${WHITE}⬇️ 下行带宽${NC}"
@@ -1623,33 +1917,36 @@ generate_final_report() {
     # UDP协议性能详情
     echo -e "${WHITE}UDP 协议性能详情${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e " 方向     │ 吞吐量        │ 丢包率        │ 抖动"
+    echo -e " 方向     │ 吞吐量                    │ 丢包率        │ 抖动"
     echo -e "─────────────────────────────────────────────────────────────────"
 
     # UDP上行
     if [ "$UDP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_up_speed_mbps]}" ]; then
-        printf " ⬆️ 上行   │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
-            "${TEST_RESULTS[udp_up_speed_mbps]} Mbps" \
+        printf " ⬆️ 上行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
+            "${TEST_RESULTS[udp_up_speed_mbps]} Mbps (${TEST_RESULTS[udp_up_speed_mibs]} MiB/s)" \
             "${TEST_RESULTS[udp_up_loss]}" \
             "${TEST_RESULTS[udp_up_jitter]} ms"
     else
-        printf " ⬆️ 上行   │ ${RED}%-12s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
+        printf " ⬆️ 上行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
             "测试失败" "N/A" "N/A"
     fi
 
     # UDP下行
     if [ "$UDP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_down_speed_mbps]}" ]; then
-        printf " ⬇️ 下行   │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
-            "${TEST_RESULTS[udp_down_speed_mbps]} Mbps" \
+        printf " ⬇️ 下行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
+            "${TEST_RESULTS[udp_down_speed_mbps]} Mbps (${TEST_RESULTS[udp_down_speed_mibs]} MiB/s)" \
             "${TEST_RESULTS[udp_down_loss]}" \
             "${TEST_RESULTS[udp_down_jitter]} ms"
     else
-        printf " ⬇️ 下行   │ ${RED}%-12s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
+        printf " ⬇️ 下行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
             "测试失败" "N/A" "N/A"
     fi
 
     echo ""
     echo -e "─────────────────────────────────────────────────────────────────"
+
+
+    echo ""
     echo -e "测试完成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
     echo ""
     echo -e "${WHITE}按任意键返回主菜单...${NC}"
@@ -1767,7 +2064,7 @@ uninstall_custom_tool() {
 cleanup_system() {
     echo -e "${BLUE}停止相关进程...${NC}"
     pkill -f "iperf3.*-s" 2>/dev/null
-    pkill -f "hping3\|nexttrace\|fping" 2>/dev/null
+    pkill -f "hping3\|nexttrace" 2>/dev/null
 
     echo -e "${BLUE}清理临时文件...${NC}"
     rm -f /tmp/isp_list_* /tmp/geo_list_* "$INITIAL_STATUS_FILE" 2>/dev/null
@@ -1901,8 +2198,6 @@ show_main_menu() {
         esac
     done
 }
-
-
 
 # 自动更新脚本 (由xwPF.sh调用时执行)
 auto_update_script() {
