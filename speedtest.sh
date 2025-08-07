@@ -1459,6 +1459,8 @@ run_bgp_analysis() {
 
                         if echo "$next_line" | grep -q 'font-size="10.00"' && [ -z "$short_name" ]; then
                             short_name=$(echo "$next_line" | sed 's/.*>\([^<]*\)<.*/\1/')
+                            # HTML实体解码
+                            short_name=$(echo "$short_name" | sed 's/&amp;/\&/g; s/&#45;/-/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#39;/'"'"'/g')
                         fi
 
                         if [ -n "$stroke_color" ] && [ -n "$short_name" ]; then
@@ -1540,8 +1542,8 @@ run_bgp_analysis() {
                 local current_color=$(echo "$current_line" | cut -d'|' -f3)
 
                 local display_name="$current_name"
-                if [ ${#display_name} -gt 8 ]; then
-                    display_name="${display_name:0:7}+"
+                if [ ${#display_name} -gt 12 ]; then
+                    display_name="${display_name:0:12}+"
                 fi
 
                 if [ $i -ne $start_idx ]; then
