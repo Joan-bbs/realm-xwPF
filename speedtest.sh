@@ -113,9 +113,6 @@ declare -A REQUIRED_TOOLS=(
 # 工具状态数组
 declare -A TOOL_STATUS=()
 
-# 记录初始安装状态的文件
-INITIAL_STATUS_FILE="/tmp/speedtest_initial_status.txt"
-
 # 检查单个工具是否存在
 check_tool() {
     local tool="$1"
@@ -123,28 +120,6 @@ check_tool() {
         return 1
     fi
     return 0
-}
-
-# 记录初始工具状态到文件
-record_initial_status() {
-    # 如果状态文件已存在且是今天创建的，则不重新生成
-    if [ -f "$INITIAL_STATUS_FILE" ]; then
-        local file_date=$(date -r "$INITIAL_STATUS_FILE" +%Y%m%d 2>/dev/null || echo "19700101")
-        local today=$(date +%Y%m%d)
-        if [ "$file_date" = "$today" ]; then
-            return 0
-        fi
-    fi
-
-    # 重新生成状态文件
-    rm -f "$INITIAL_STATUS_FILE"
-    for tool in "${!REQUIRED_TOOLS[@]}"; do
-        if check_tool "$tool"; then
-            echo "$tool=installed" >> "$INITIAL_STATUS_FILE"
-        else
-            echo "$tool=missing" >> "$INITIAL_STATUS_FILE"
-        fi
-    done
 }
 
 # 检测所有工具状态
@@ -169,71 +144,24 @@ get_missing_tools() {
     echo "${missing_tools[@]}"
 }
 
-# 获取已安装的工具列表
-get_installed_tools() {
-    local installed_tools=()
-    for tool in "${!TOOL_STATUS[@]}"; do
-        if [ "${TOOL_STATUS[$tool]}" = "installed" ]; then
-            installed_tools+=("$tool")
-        fi
-    done
-    echo "${installed_tools[@]}"
-}
-
-# 获取新安装的工具列表（排除初始已有的）
-get_newly_installed_tools() {
-    local newly_installed_tools=()
-
-    if [ -f "$INITIAL_STATUS_FILE" ]; then
-        for tool in "${!TOOL_STATUS[@]}"; do
-            if [ "${TOOL_STATUS[$tool]}" = "installed" ]; then
-                # 检查初始状态文件中的记录
-                local initial_status=$(grep "^$tool=" "$INITIAL_STATUS_FILE" 2>/dev/null | cut -d'=' -f2)
-                if [ "$initial_status" = "missing" ]; then
-                    newly_installed_tools+=("$tool")
-                fi
-            fi
-        done
-    else
-        # 如果没有初始状态文件，返回所有已安装的工具
-        for tool in "${!TOOL_STATUS[@]}"; do
-            if [ "${TOOL_STATUS[$tool]}" = "installed" ]; then
-                newly_installed_tools+=("$tool")
-            fi
-        done
-    fi
-
-    echo "${newly_installed_tools[@]}"
-}
-
-# 检查工具完整性
-check_tools_completeness() {
-    local missing_tools=($(get_missing_tools))
-    if [ ${#missing_tools[@]} -eq 0 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
 
 # 安装nexttrace
 install_nexttrace() {
-    echo -e "${YELLOW}正在安装 nexttrace...${NC}"
+    echo -e "${BLUE}🔧 安装 nexttrace...${NC}"
 
     # 检测系统架构
     local arch=$(uname -m)
-    local os="linux"
-    local download_url=""
+    local download_url
 
-    case $arch in
-        x86_64)
-            download_url="https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_amd64"
+    case "$arch" in
+        "x86_64")
+            download_url="https://github.com/nxtrace/NTrace-core/releases/latest/download/nexttrace_linux_amd64"
             ;;
-        aarch64|arm64)
-            download_url="https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_arm64"
+        "aarch64")
+            download_url="https://github.com/nxtrace/NTrace-core/releases/latest/download/nexttrace_linux_arm64"
             ;;
-        armv7l)
-            download_url="https://github.com/sjlleo/nexttrace/releases/latest/download/nexttrace_linux_armv7"
+        "armv7l")
+            download_url="https://github.com/nxtrace/NTrace-core/releases/latest/download/nexttrace_linux_armv7"
             ;;
         *)
             echo -e "${RED}✗ 不支持的系统架构: $arch${NC}"
@@ -309,6 +237,7 @@ install_custom_tool() {
     esac
 }
 
+
 # 安装缺失的工具
 install_missing_tools() {
     local missing_tools=($(get_missing_tools))
@@ -341,6 +270,7 @@ install_missing_tools() {
                 fi
                 ;;
             *)
+                echo -e "${RED}✗ 未知的安装类型: $install_type${NC}"
                 install_failed=true
                 ;;
         esac
@@ -351,18 +281,12 @@ install_missing_tools() {
     fi
 }
 
-# 主安装函数
+# 安装所需工具
 install_required_tools() {
-    # 记录初始状态
-    record_initial_status
+    echo -e "${BLUE}🔍 检测工具状态...${NC}"
 
     # 检测当前工具状态
     detect_all_tools
-
-    # 检查完整性
-    if check_tools_completeness; then
-        return 0
-    fi
 
     # 安装缺失的工具
     install_missing_tools
@@ -2022,55 +1946,6 @@ relay_server_mode() {
     fi
 }
 
-# 卸载单个APT工具
-uninstall_apt_tool() {
-    local tool="$1"
-    local package="$2"
-
-    if apt-get remove -y "$package" >/dev/null 2>&1; then
-        echo -e "${GREEN}✅ $tool 卸载成功${NC}"
-        TOOL_STATUS["$tool"]="missing"
-        return 0
-    else
-        echo -e "${RED}✗ $tool 卸载失败${NC}"
-        return 1
-    fi
-}
-
-# 卸载自定义工具
-uninstall_custom_tool() {
-    local tool="$1"
-
-    case "$tool" in
-        "nexttrace")
-            if [ -f "/usr/local/bin/nexttrace" ]; then
-                rm -f "/usr/local/bin/nexttrace"
-                echo -e "${GREEN}✅ nexttrace 卸载成功${NC}"
-                TOOL_STATUS["nexttrace"]="missing"
-                return 0
-            else
-                echo -e "${YELLOW}⚠️  nexttrace 未安装${NC}"
-                return 0
-            fi
-            ;;
-        *)
-            echo -e "${RED}✗ 未知的自定义工具: $tool${NC}"
-            return 1
-            ;;
-    esac
-}
-
-# 清理进程和临时文件
-cleanup_system() {
-    echo -e "${BLUE}停止相关进程...${NC}"
-    pkill -f "iperf3.*-s" 2>/dev/null
-    pkill -f "hping3\|nexttrace" 2>/dev/null
-
-    echo -e "${BLUE}清理临时文件...${NC}"
-    rm -f /tmp/isp_list_* /tmp/geo_list_* "$INITIAL_STATUS_FILE" 2>/dev/null
-    find /tmp -name "tmp.*" -user "$(whoami)" -mtime +0 -delete 2>/dev/null || true
-}
-
 # 检测脚本位置
 get_script_paths() {
     local paths=("$(readlink -f "$0" 2>/dev/null || echo "$0")")
@@ -2083,75 +1958,56 @@ get_script_paths() {
     printf '%s\n' "${paths[@]}" | sort -u
 }
 
-# 卸载新安装的工具
-uninstall_tools() {
-    local tools=($(get_newly_installed_tools))
-    [ ${#tools[@]} -eq 0 ] && return 0
-
-    for tool in "${tools[@]}"; do
-        local config="${REQUIRED_TOOLS[$tool]}"
-        local type="${config%%:*}"
-        local package="${config##*:}"
-
-        case "$type" in
-            "apt") uninstall_apt_tool "$tool" "$package" ;;
-            "custom") uninstall_custom_tool "$tool" ;;
-        esac
-    done
-
-    apt-get autoremove -y >/dev/null 2>&1
-    apt-get autoclean >/dev/null 2>&1
-}
-
 # 卸载脚本
 uninstall_speedtest() {
     clear
     echo -e "${RED}=== 卸载测速测试工具 ===${NC}"
     echo ""
 
-    detect_all_tools
-    local tools=($(get_newly_installed_tools))
-    local scripts=($(get_script_paths))
-
     echo -e "${YELLOW}将执行以下操作：${NC}"
-    if [ ${#tools[@]} -gt 0 ]; then
-        echo -e "${BLUE}• 卸载工具: ${tools[*]}${NC}"
-    else
-        echo -e "${YELLOW}• 无需卸载工具${NC}"
-    fi
+    echo -e "${BLUE}• 停止可能运行的测试服务${NC}"
+    echo -e "${BLUE}• 删除脚本相关工具${NC}"
     echo -e "${BLUE}• 删除脚本文件${NC}"
-    echo -e "${BLUE}• 清理临时文件和进程${NC}"
-    echo -e "${GREEN}• 恢复到未使用过本功能的状态${NC}"
+    echo -e "${BLUE}• 清理临时文件${NC}"
     echo ""
 
     read -p "确认卸载？(y/N): " confirm
     if [[ $confirm =~ ^[Yy]$ ]]; then
-        # 卸载工具
-        if [ ${#tools[@]} -gt 0 ]; then
-            echo -e "${YELLOW}卸载工具...${NC}"
-            uninstall_tools
+        # 停止可能运行的iperf3服务
+        echo -e "${YELLOW}停止测试服务...${NC}"
+        pkill -f "iperf3.*-s" 2>/dev/null || true
+
+        # 删除nexttrace工具
+        echo -e "${BLUE}删除脚本相关工具...${NC}"
+        if [ -f "/usr/local/bin/nexttrace" ]; then
+            rm -f "/usr/local/bin/nexttrace"
+            echo -e "${GREEN}✅ 删除脚本相关工具完成${NC}"
         fi
 
-        # 清理系统
-        cleanup_system
+        # 清理临时文件
+        echo -e "${BLUE}清理临时文件...${NC}"
+        rm -f /tmp/speedtest_* 2>/dev/null || true
+        rm -f /tmp/isp_list_* /tmp/geo_list_* 2>/dev/null || true
 
         # 删除脚本文件
         echo -e "${BLUE}删除脚本文件...${NC}"
+        local scripts=($(get_script_paths))
         local deleted_count=0
-        while IFS= read -r script_path; do
+
+        for script_path in "${scripts[@]}"; do
             if [ -f "$script_path" ]; then
                 rm -f "$script_path"
                 echo -e "${GREEN}✅ 删除 $script_path${NC}"
                 ((deleted_count++))
             fi
-        done < <(get_script_paths)
+        done
 
         if [ $deleted_count -eq 0 ]; then
             echo -e "${YELLOW}未找到脚本文件${NC}"
         fi
 
         echo ""
-        echo -e "${GREEN}⌛ 已恢复到未使用过本功能的状态${NC}"
+        echo -e "${GREEN}✅ 卸载完成${NC}"
         echo -e "${WHITE}按任意键退出...${NC}"
         read -n 1 -s
         exit 0
@@ -2204,48 +2060,45 @@ auto_update_script() {
     # 获取当前脚本路径
     local current_script="$0"
 
-    # 检查是否为系统安装的脚本路径
-    if [[ "$current_script" == "/etc/realm/speedtest.sh" ]]; then
-        echo -e "${GREEN}✓ 检测到系统已安装脚本，正在更新...${NC}"
+    echo -e "${GREEN}✓ 正在更新测速脚本...${NC}"
 
-        # 自动从GitHub下载最新版本覆盖更新
-        echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
+    # 自动从GitHub下载最新版本覆盖更新
+    echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
 
-        local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
-        local download_success=false
-        local sources=(
-            ""  # 官方源
-            "https://proxy.vvvv.ee/"
-            "https://demo.52013120.xyz/"
-            "https://ghfast.top/"
-        )
+    local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
+    local download_success=false
+    local sources=(
+        ""  # 官方源
+        "https://proxy.vvvv.ee/"
+        "https://demo.52013120.xyz/"
+        "https://ghfast.top/"
+    )
 
-        for proxy in "${sources[@]}"; do
-            local full_url="${proxy}${script_url}"
-            local source_name
+    for proxy in "${sources[@]}"; do
+        local full_url="${proxy}${script_url}"
+        local source_name
 
-            if [ -z "$proxy" ]; then
-                source_name="GitHub官方源"
-            else
-                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
-            fi
-
-            echo -e "${BLUE}尝试 $source_name${NC}"
-
-            if curl -fsSL "$full_url" -o "$current_script" 2>/dev/null; then
-                chmod +x "$current_script"
-                echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
-                download_success=true
-                break
-            else
-                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
-            fi
-        done
-
-        if [ "$download_success" = false ]; then
-            echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
-            echo -e "${BLUE}使用现有脚本版本${NC}"
+        if [ -z "$proxy" ]; then
+            source_name="GitHub官方源"
+        else
+            source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
         fi
+
+        echo -e "${BLUE}尝试 $source_name${NC}"
+
+        if curl -fsSL "$full_url" -o "$current_script" 2>/dev/null; then
+            chmod +x "$current_script"
+            echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
+            download_success=true
+            break
+        else
+            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+        fi
+    done
+
+    if [ "$download_success" = false ]; then
+        echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
+        echo -e "${BLUE}使用现有脚本版本${NC}"
     fi
 
     echo ""
@@ -2255,7 +2108,7 @@ auto_update_script() {
 main() {
     check_root
 
-    # 自动更新脚本 (仅在系统安装路径下执行)
+    # 自动更新脚本
     auto_update_script
 
     # 检测工具状态并安装缺失的工具
