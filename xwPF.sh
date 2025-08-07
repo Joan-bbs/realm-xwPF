@@ -3863,8 +3863,8 @@ install_realm_from_local_package() {
         if cp "$realm_binary" "$REALM_PATH" && chmod +x "$REALM_PATH"; then
             echo -e "${GREEN}✓ realm 安装成功${NC}"
 
-            # 根据之前的服务状态决定重启方式
-            restart_realm_service "$service_was_running"
+            # 根据之前的服务状态决定重启方式（更新场景）
+            restart_realm_service "$service_was_running" true
 
             rm -rf "$temp_dir"
             return 0
@@ -3981,13 +3981,14 @@ get_latest_realm_version() {
 # 智能重启realm服务
 restart_realm_service() {
     local was_running="$1"
+    local is_update="${2:-false}"  # 是否为更新场景
 
-    if [ "$was_running" = true ]; then
-        echo -e "${YELLOW}正在重启realm服务...${NC}"
+    if [ "$was_running" = true ] || [ "$is_update" = true ]; then
+        echo -e "${YELLOW}正在启动realm服务...${NC}"
         if systemctl start realm >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ realm服务已重启${NC}"
+            echo -e "${GREEN}✓ realm服务已启动${NC}"
         else
-            echo -e "${YELLOW}服务重启失败，尝试重新初始化...${NC}"
+            echo -e "${YELLOW}服务启动失败，尝试重新初始化...${NC}"
             start_empty_service
         fi
     else
@@ -4005,6 +4006,14 @@ compare_and_ask_update() {
     local current_ver=$(echo "$current_version" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -z "$current_ver" ]; then
         current_ver="v0.0.0"  # 如果无法提取版本号，假设为旧版本
+    fi
+
+    # 统一版本格式（都添加v前缀）
+    if [[ ! "$current_ver" =~ ^v ]]; then
+        current_ver="v$current_ver"
+    fi
+    if [[ ! "$latest_version" =~ ^v ]]; then
+        latest_version="v$latest_version"
     fi
 
     # 比较版本
@@ -4161,8 +4170,8 @@ install_realm() {
         echo -e "${GREEN}✓ realm 安装成功${NC}"
         rm -f "$download_file" "${work_dir}/realm"
 
-        # 根据之前的服务状态决定重启方式
-        restart_realm_service "$service_was_running"
+        # 根据之前的服务状态决定重启方式（更新场景）
+        restart_realm_service "$service_was_running" true
     else
         echo -e "${RED}✗ 安装失败${NC}"
         exit 1
