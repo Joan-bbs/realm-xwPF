@@ -3853,47 +3853,18 @@ install_realm_from_local_package() {
 
     if [ -n "$realm_binary" ] && [ -f "$realm_binary" ]; then
         # 检查并停止正在运行的realm服务
-        if systemctl is-active realm >/dev/null 2>&1; then
-            echo -e "${BLUE}检测到realm服务正在运行，正在停止服务...${NC}"
-            if systemctl stop realm >/dev/null 2>&1; then
-                echo -e "${GREEN}✓ realm服务已停止${NC}"
-            else
-                echo -e "${RED}✗ 停止realm服务失败，无法安全更新${NC}"
-                rm -rf "$temp_dir"
-                return 1
-            fi
+        local service_was_running=$(safe_stop_realm_service)
+        if [ $? -ne 0 ]; then
+            rm -rf "$temp_dir"
+            return 1
         fi
 
         # 复制到目标位置
         if cp "$realm_binary" "$REALM_PATH" && chmod +x "$REALM_PATH"; then
             echo -e "${GREEN}✓ realm 安装成功${NC}"
 
-            # 验证安装并获取版本
-            echo -e "${YELLOW}验证 realm 可执行性...${NC}"
-
-            # 首先检查文件是否可执行
-            if [ ! -x "${REALM_PATH}" ]; then
-                echo -e "${RED}✗ realm 文件不可执行${NC}"
-                rm -rf "$temp_dir"
-                return 1
-            fi
-
-            # 尝试执行版本检查
-            local version_output=""
-            if version_output=$(${REALM_PATH} --version 2>&1); then
-                echo -e "${GREEN}✓ ${version_output}${NC}"
-            elif version_output=$(${REALM_PATH} -v 2>&1); then
-                echo -e "${GREEN}✓ ${version_output}${NC}"
-            else
-                echo -e "${RED}✗ realm 无法执行版本检查${NC}"
-                echo -e "${YELLOW}可能原因：${NC}"
-                echo -e "${BLUE}  1. 架构不匹配（如在x86_64系统上使用aarch64版本）${NC}"
-                echo -e "${BLUE}  2. 二进制文件损坏${NC}"
-                echo -e "${BLUE}  3. 缺少依赖库${NC}"
-                echo -e "${YELLOW}错误信息: ${version_output}${NC}"
-                rm -rf "$temp_dir"
-                return 1
-            fi
+            # 根据之前的服务状态决定重启方式
+            restart_realm_service "$service_was_running"
 
             rm -rf "$temp_dir"
             return 0
@@ -3988,6 +3959,89 @@ reliable_download() {
     return 1
 }
 
+# 获取realm最新版本号
+get_latest_realm_version() {
+    echo -e "${YELLOW}获取最新版本信息...${NC}"
+
+    # 直接解析releases页面获取版本号
+    local latest_version=$(curl -sL "https://github.com/zhboner/realm/releases" 2>/dev/null | \
+        head -2100 | \
+        sed -n 's|.*releases/tag/v\([0-9.]*\).*|v\1|p' | head -1)
+
+    # 如果失败，使用硬编码版本号
+    if [ -z "$latest_version" ]; then
+        echo -e "${YELLOW}使用当前最新版本 v2.8.0${NC}"
+        latest_version="v2.8.0"
+    fi
+
+    echo -e "${GREEN}✓ 检测到最新版本: ${latest_version}${NC}"
+    echo "$latest_version"
+}
+
+# 智能重启realm服务
+restart_realm_service() {
+    local was_running="$1"
+
+    if [ "$was_running" = true ]; then
+        echo -e "${YELLOW}正在重启realm服务...${NC}"
+        if systemctl start realm >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ realm服务已重启${NC}"
+        else
+            echo -e "${YELLOW}服务重启失败，尝试重新初始化...${NC}"
+            start_empty_service
+        fi
+    else
+        # 首次安装，启动空服务完成安装
+        start_empty_service
+    fi
+}
+
+# 比较realm版本并询问更新
+compare_and_ask_update() {
+    local current_version="$1"
+    local latest_version="$2"
+
+    # 提取当前版本号进行比较
+    local current_ver=$(echo "$current_version" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [ -z "$current_ver" ]; then
+        current_ver="v0.0.0"  # 如果无法提取版本号，假设为旧版本
+    fi
+
+    # 比较版本
+    if [ "$current_ver" = "$latest_version" ]; then
+        echo -e "${GREEN}✓ 当前版本已是最新版本${NC}"
+        return 1  # 不需要更新
+    else
+        echo -e "${YELLOW}发现新版本: ${current_ver} → ${latest_version}${NC}"
+        # 询问是否覆盖更新
+        read -p "是否更新到最新版本？(y/n) [默认: n]: " update_choice
+        if [[ ! "$update_choice" =~ ^[Yy]$ ]]; then
+            echo -e "${BLUE}使用现有的 realm 安装${NC}"
+            return 1  # 用户选择不更新
+        fi
+        echo -e "${YELLOW}将更新到最新版本...${NC}"
+        return 0  # 需要更新
+    fi
+}
+
+# 安全停止realm服务
+safe_stop_realm_service() {
+    local service_was_running=false
+
+    if systemctl is-active realm >/dev/null 2>&1; then
+        echo -e "${BLUE}检测到realm服务正在运行，正在停止服务...${NC}"
+        if systemctl stop realm >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ realm服务已停止${NC}"
+            service_was_running=true
+        else
+            echo -e "${RED}✗ 停止realm服务失败，无法安全更新${NC}"
+            return 1
+        fi
+    fi
+
+    echo "$service_was_running"
+}
+
 # 安装 realm - 虚拟化适配
 install_realm() {
     echo -e "${GREEN}正在检查 realm 安装状态...${NC}"
@@ -4017,16 +4071,19 @@ install_realm() {
             echo -e "${GREEN}✓ 检测到已安装的 realm: ${current_version}${NC}"
             echo ""
 
-            # 询问是否覆盖更新
-            read -p "是否覆盖更新安装最新版本？(y/n) [默认: n]: " update_choice
-            if [[ ! "$update_choice" =~ ^[Yy]$ ]]; then
-                echo -e "${BLUE}使用现有的 realm 安装${NC}"
+            # 获取最新版本号进行比较
+            LATEST_VERSION=$(get_latest_realm_version)
+
+            # 比较版本并询问更新
+            if ! compare_and_ask_update "$current_version" "$LATEST_VERSION"; then
                 return 0
             fi
-            echo -e "${YELLOW}将覆盖安装最新版本...${NC}"
         fi
     else
         echo -e "${YELLOW}未检测到 realm 安装，开始下载安装...${NC}"
+
+        # 获取最新版本号
+        LATEST_VERSION=$(get_latest_realm_version)
     fi
 
     # 检测本地压缩包
@@ -4054,22 +4111,6 @@ install_realm() {
     else
         echo -e "${BLUE}未发现本地压缩包，使用在线下载...${NC}"
     fi
-
-    # 获取最新版本号
-    echo -e "${YELLOW}获取最新版本信息...${NC}"
-
-    # 直接解析releases页面获取版本号
-    LATEST_VERSION=$(curl -sL "https://github.com/zhboner/realm/releases" 2>/dev/null | \
-        head -2100 | \
-        sed -n 's|.*releases/tag/v\([0-9.]*\).*|v\1|p' | head -1)
-
-    # 如果失败，使用硬编码版本号
-    if [ -z "$LATEST_VERSION" ]; then
-        echo -e "${YELLOW}使用当前最新版本 v2.7.0${NC}"
-        LATEST_VERSION="v2.7.0"
-    fi
-
-    echo -e "${GREEN}✓ 检测到最新版本: ${LATEST_VERSION}${NC}"
 
     # 检测系统架构
     ARCH=$(uname -m)
@@ -4107,14 +4148,9 @@ install_realm() {
     echo -e "${YELLOW}正在解压安装...${NC}"
 
     # 检查并停止正在运行的realm服务
-    if systemctl is-active realm >/dev/null 2>&1; then
-        echo -e "${BLUE}检测到realm服务正在运行，正在停止服务...${NC}"
-        if systemctl stop realm >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ realm服务已停止${NC}"
-        else
-            echo -e "${RED}✗ 停止realm服务失败，无法安全更新${NC}"
-            return 1
-        fi
+    local service_was_running=$(safe_stop_realm_service)
+    if [ $? -ne 0 ]; then
+        return 1
     fi
 
     # 解压安装
@@ -4125,33 +4161,8 @@ install_realm() {
         echo -e "${GREEN}✓ realm 安装成功${NC}"
         rm -f "$download_file" "${work_dir}/realm"
 
-        # 验证安装并获取真实版本
-        echo -e "${YELLOW}验证 realm 可执行性...${NC}"
-
-        # 首先检查文件是否可执行
-        if [ ! -x "${REALM_PATH}" ]; then
-            echo -e "${RED}✗ realm 文件不可执行${NC}"
-            return 1
-        fi
-
-        # 尝试执行版本检查
-        local version_output=""
-        if version_output=$(${REALM_PATH} --version 2>&1); then
-            echo -e "${GREEN}✓ ${version_output}${NC}"
-            # 启动空服务完成安装
-            start_empty_service
-        elif version_output=$(${REALM_PATH} -v 2>&1); then
-            echo -e "${GREEN}✓ ${version_output}${NC}"
-            # 启动空服务完成安装
-            start_empty_service
-        else
-            echo -e "${RED}✗ realm 无法执行版本检查${NC}"
-            echo -e "${YELLOW}可能原因：${NC}"
-            echo -e "${BLUE}  1. 下载的架构与系统不匹配${NC}"
-            echo -e "${BLUE}  2. 二进制文件损坏${NC}"
-            echo -e "${YELLOW}错误信息: ${version_output}${NC}"
-            return 1
-        fi
+        # 根据之前的服务状态决定重启方式
+        restart_realm_service "$service_was_running"
     else
         echo -e "${RED}✗ 安装失败${NC}"
         exit 1
