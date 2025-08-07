@@ -354,10 +354,10 @@ test_connectivity() {
     fi
 }
 
-# 落地机模式 - 启动服务端
+# 服务端模式 - 启动服务端
 landing_server_mode() {
     clear
-    echo -e "${GREEN}=== 落地机模式 ===${NC}"
+    echo -e "${GREEN}=== 服务端 (开放测试) ===${NC}"
     echo ""
 
     # 输入监听端口
@@ -391,12 +391,12 @@ landing_server_mode() {
     # 获取本机IP
     local local_ip=$(get_public_ip || echo "获取失败")
 
-    echo -e "${BLUE}📋 落地机信息${NC}"
+    echo -e "${BLUE}📋 服务端信息${NC}"
     echo -e "   IP地址: ${GREEN}$local_ip${NC}"
     echo -e "   端口: ${GREEN}$TARGET_PORT${NC}"
     echo ""
-    echo -e "${YELLOW}💡 请在中转机输入落地机IP: ${GREEN}$local_ip${NC}"
-    echo -e "${YELLOW}   请到中转机选择1. 中转机 (发起测试)...${NC}"
+    echo -e "${YELLOW}💡 请在客户端输入服务端IP: ${GREEN}$local_ip${NC}"
+    echo -e "${YELLOW}   请到客户端选择1. 客户端 (本机发起测试)...${NC}"
 
     echo ""
     echo -e "${WHITE}按任意键停止服务${NC}"
@@ -1726,13 +1726,13 @@ generate_final_report() {
     # 报告标题
     echo -e "${BLUE}🌐 网络性能测试报告${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e "  源: 中转机 (本机)"
+    echo -e "  源: 客户端 (本机发起测试)"
 
     # 隐藏完整IP地址，只显示前两段
     local masked_ip=$(echo "$TARGET_IP" | awk -F'.' '{print $1"."$2".*.*"}')
     echo -e "  目标: $masked_ip:$TARGET_PORT"
 
-    echo -e "  测试方向: 中转机 ↔ 落地机 "
+    echo -e "  测试方向: 客户端 ↔ 服务端 "
     echo -e "  单项测试时长: ${TEST_DURATION}秒"
     echo ""
 
@@ -1877,18 +1877,18 @@ generate_final_report() {
     read -n 1 -s
 }
 
-# 中转机模式 - 发起测试
+# 客户端模式 - 发起测试
 relay_server_mode() {
     clear
-    echo -e "${GREEN}=== 中转机模式 ===${NC}"
+    echo -e "${GREEN}=== 客户端 (本机发起测试) ===${NC}"
     echo ""
 
-    # 输入落地机IP (目标服务器)
+    # 输入服务端IP (目标服务器)
     while true; do
-        read -p "落地机IP (目标服务器): " TARGET_IP
+        read -p "服务端IP (目标服务器): " TARGET_IP
 
         if [ -z "$TARGET_IP" ]; then
-            echo -e "${RED}请输入落地机的IP地址${NC}"
+            echo -e "${RED}请输入服务端的IP地址${NC}"
         elif validate_ip "$TARGET_IP"; then
             break
         else
@@ -1937,7 +1937,7 @@ relay_server_mode() {
     else
         echo -e "${RED}✗ 无法连接到 $TARGET_IP:$TARGET_PORT${NC}"
         echo -e "${YELLOW}请确认：${NC}"
-        echo -e "${YELLOW}1. 落地机已启动iperf3服务${NC}"
+        echo -e "${YELLOW}1. 服务端已启动iperf3服务${NC}"
         echo -e "${YELLOW}2. IP地址和端口正确${NC}"
         echo -e "${YELLOW}3. 防火墙已放行端口${NC}"
         echo ""
@@ -2022,8 +2022,8 @@ show_main_menu() {
     echo -e "${GREEN}=== 网络链路测试(先开放,再发起) ===${NC}"
     echo ""
     echo "请选择操作:"
-    echo -e "${GREEN}1.${NC} 中转机 (发起测试)"
-    echo -e "${BLUE}2.${NC} 落地机 (开放测试)"
+    echo -e "${GREEN}1.${NC} 客户端 (本机发起测试)"
+    echo -e "${BLUE}2.${NC} 服务端 (开放测试)"
     echo -e "${RED}3.${NC} 卸载脚本"
     echo -e "${YELLOW}4.${NC} 返回中转脚本"
     echo ""
