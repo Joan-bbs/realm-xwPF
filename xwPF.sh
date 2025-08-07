@@ -6482,8 +6482,6 @@ download_speedtest_script() {
     local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
     local target_path="/etc/realm/speedtest.sh"
 
-    echo -e "${YELLOW}首次使用测速功能，正在下载测速脚本...${NC}"
-
     # 创建目录
     mkdir -p "$(dirname "$target_path")"
 
@@ -6521,13 +6519,12 @@ download_speedtest_script() {
 speedtest_menu() {
     local speedtest_script="/etc/realm/speedtest.sh"
 
-    # 检查测速脚本是否存在
-    if [ ! -f "$speedtest_script" ]; then
-        if ! download_speedtest_script; then
-            echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
-            read -p "按回车键返回主菜单..."
-            return 1
-        fi
+    # 每次都更新测速脚本
+    echo -e "${YELLOW}正在下载测速脚本...${NC}"
+    if ! download_speedtest_script; then
+        echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
+        read -p "按回车键返回主菜单..."
+        return 1
     fi
 
     # 检查脚本是否可执行
@@ -6536,7 +6533,7 @@ speedtest_menu() {
     fi
 
     # 调用测速脚本
-    echo -e "${BLUE}启动中转工具...${NC}"
+    echo -e "${BLUE}启动测速工具...${NC}"
     echo ""
     bash "$speedtest_script"
 
