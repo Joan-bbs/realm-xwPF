@@ -3961,7 +3961,7 @@ reliable_download() {
 
 # 获取realm最新版本号
 get_latest_realm_version() {
-    echo -e "${YELLOW}获取最新版本信息...${NC}"
+    echo -e "${YELLOW}获取最新版本信息...${NC}" >&2
 
     # 直接解析releases页面获取版本号
     local latest_version=$(curl -sL "https://github.com/zhboner/realm/releases" 2>/dev/null | \
@@ -3970,11 +3970,11 @@ get_latest_realm_version() {
 
     # 如果失败，使用硬编码版本号
     if [ -z "$latest_version" ]; then
-        echo -e "${YELLOW}使用当前最新版本 v2.8.0${NC}"
+        echo -e "${YELLOW}使用当前最新版本 v2.8.0${NC}" >&2
         latest_version="v2.8.0"
     fi
 
-    echo -e "${GREEN}✓ 检测到最新版本: ${latest_version}${NC}"
+    echo -e "${GREEN}✓ 检测到最新版本: ${latest_version}${NC}" >&2
     echo "$latest_version"
 }
 
