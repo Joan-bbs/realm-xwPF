@@ -18,6 +18,32 @@ TARGET_PORT="5201"
 TEST_DURATION="30"
 ROLE=""
 
+# 端口冲突处理相关变量
+STOPPED_PROCESS_PID=""
+STOPPED_PROCESS_CMD=""
+STOPPED_PROCESS_PORT=""
+
+# 清理标志位，防止重复执行
+CLEANUP_DONE=false
+
+# 异常退出时的清理函数
+cleanup_on_exit() {
+    # 防止重复执行清理
+    if [ "$CLEANUP_DONE" = true ]; then
+        return
+    fi
+    CLEANUP_DONE=true
+
+    # 停止可能运行的iperf3服务
+    pkill -f "iperf3.*-s" 2>/dev/null || true
+
+    # 恢复被临时停止的进程
+    restore_stopped_process
+
+    echo -e "\n${YELLOW}脚本已退出，清理完成${NC}"
+}
+
+
 # 全局User-Agent
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -342,6 +368,144 @@ validate_port() {
     fi
 }
 
+# 检测端口占用情况
+check_port_usage() {
+    local port="$1"
+    local result=""
+
+    # 优先使用ss命令
+    if command -v ss >/dev/null 2>&1; then
+        result=$(ss -tlnp 2>/dev/null | grep ":$port ")
+    elif command -v netstat >/dev/null 2>&1; then
+        result=$(netstat -tlnp 2>/dev/null | grep ":$port ")
+    else
+        return 1
+    fi
+
+    if [ -n "$result" ]; then
+        echo "$result"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 从端口占用信息中提取进程信息
+extract_process_info() {
+    local port_info="$1"
+    local pid=""
+    local cmd=""
+
+    # 从ss或netstat输出中提取PID和进程名
+    if echo "$port_info" | grep -q "pid="; then
+        # ss格式: users:(("进程名",pid=1234,fd=5))
+        pid=$(echo "$port_info" | grep -o 'pid=[0-9]\+' | cut -d'=' -f2)
+        cmd=$(echo "$port_info" | grep -o '(".*"' | sed 's/("//; s/".*//')
+    else
+        # netstat格式: 1234/进程名
+        local proc_info=$(echo "$port_info" | awk '{print $NF}' | grep -o '[0-9]\+/.*')
+        if [ -n "$proc_info" ]; then
+            pid=$(echo "$proc_info" | cut -d'/' -f1)
+            cmd=$(echo "$proc_info" | cut -d'/' -f2)
+        fi
+    fi
+
+    if [ -n "$pid" ] && [ -n "$cmd" ]; then
+        echo "$pid|$cmd"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 临时停止占用端口的进程
+stop_port_process() {
+    local port="$1"
+    local port_info=$(check_port_usage "$port")
+
+    if [ -z "$port_info" ]; then
+        return 0  # 端口未被占用
+    fi
+
+    local process_info=$(extract_process_info "$port_info")
+    if [ -z "$process_info" ]; then
+        echo -e "${YELLOW}⚠️  无法获取占用进程信息，跳过进程停止${NC}"
+        return 1
+    fi
+
+    local pid=$(echo "$process_info" | cut -d'|' -f1)
+    local cmd=$(echo "$process_info" | cut -d'|' -f2)
+
+    echo -e "${YELLOW}检测到端口 $port 被占用${NC}"
+    echo -e "${BLUE}占用进程: PID=$pid, 命令=$cmd${NC}"
+    echo ""
+
+    read -p "是否临时停止该进程以进行测试？测试完成后会自动恢复 (y/N): " confirm
+    if [[ $confirm =~ ^[Yy]$ ]]; then
+        # 获取完整的进程命令行用于恢复
+        local full_cmd=$(ps -p "$pid" -o args= 2>/dev/null | head -1)
+        if [ -z "$full_cmd" ]; then
+            full_cmd="$cmd"  # 备用方案
+        fi
+
+        # 停止进程
+        if kill "$pid" 2>/dev/null; then
+            echo -e "${GREEN}✅ 进程已临时停止${NC}"
+
+            # 记录进程信息用于恢复
+            STOPPED_PROCESS_PID="$pid"
+            STOPPED_PROCESS_CMD="$full_cmd"
+            STOPPED_PROCESS_PORT="$port"
+
+            # 等待端口释放
+            sleep 2
+
+            # 验证端口是否已释放
+            if check_port_usage "$port" >/dev/null 2>&1; then
+                echo -e "${YELLOW}⚠️  端口可能仍被占用，请手动检查${NC}"
+                return 1
+            else
+                echo -e "${GREEN}✅ 端口 $port 已释放${NC}"
+                return 0
+            fi
+        else
+            echo -e "${RED}✗ 无法停止进程 (PID: $pid)${NC}"
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}用户选择不停止进程，请手动处理端口冲突或选择其他端口${NC}"
+        return 1
+    fi
+}
+
+# 恢复被停止的进程
+restore_stopped_process() {
+    if [ -n "$STOPPED_PROCESS_CMD" ] && [ -n "$STOPPED_PROCESS_PORT" ]; then
+        echo -e "${BLUE}正在恢复被停止的进程...${NC}"
+        echo -e "${YELLOW}恢复命令: $STOPPED_PROCESS_CMD${NC}"
+
+        # 在后台启动进程
+        nohup $STOPPED_PROCESS_CMD >/dev/null 2>&1 &
+        local new_pid=$!
+
+        # 等待进程启动
+        sleep 3
+
+        # 检查进程是否成功启动并占用端口
+        if check_port_usage "$STOPPED_PROCESS_PORT" >/dev/null 2>&1; then
+            echo -e "${GREEN}✅ 进程已成功恢复 (新PID: $new_pid)${NC}"
+        else
+            echo -e "${YELLOW}⚠️  进程恢复可能失败，请手动检查${NC}"
+            echo -e "${YELLOW}   原始命令: $STOPPED_PROCESS_CMD${NC}"
+        fi
+
+        # 清空记录
+        STOPPED_PROCESS_PID=""
+        STOPPED_PROCESS_CMD=""
+        STOPPED_PROCESS_PORT=""
+    fi
+}
+
 # 测试连通性
 test_connectivity() {
     local ip="$1"
@@ -365,12 +529,26 @@ landing_server_mode() {
         read -p "监听测试端口 [默认5201]: " input_port
         if [ -z "$input_port" ]; then
             TARGET_PORT="5201"
-            break
         elif validate_port "$input_port"; then
             TARGET_PORT="$input_port"
-            break
         else
             echo -e "${RED}无效端口号，请输入1-65535之间的数字${NC}"
+            continue
+        fi
+
+        # 检测端口冲突并处理
+        echo -e "${YELLOW}检查端口 $TARGET_PORT 占用情况...${NC}"
+        if check_port_usage "$TARGET_PORT" >/dev/null 2>&1; then
+            if stop_port_process "$TARGET_PORT"; then
+                echo -e "${GREEN}✅ 端口 $TARGET_PORT 可用${NC}"
+                break
+            else
+                echo -e "${RED}端口 $TARGET_PORT 冲突未解决，请选择其他端口${NC}"
+                continue
+            fi
+        else
+            echo -e "${GREEN}✅ 端口 $TARGET_PORT 可用${NC}"
+            break
         fi
     done
 
@@ -383,8 +561,13 @@ landing_server_mode() {
     # 启动iperf3服务端
     if iperf3 -s -p "$TARGET_PORT" -D >/dev/null 2>&1; then
         echo -e "${GREEN}✅ iperf3服务已启动 (端口$TARGET_PORT)${NC}"
+
+        # 只在服务运行期间设置临时trap
+        trap 'pkill -f "iperf3.*-s.*-p.*$TARGET_PORT" 2>/dev/null; restore_stopped_process; exit' INT TERM
     else
         echo -e "${RED}✗ iperf3服务启动失败${NC}"
+        # 恢复被临时停止的进程
+        restore_stopped_process
         exit 1
     fi
 
@@ -404,10 +587,16 @@ landing_server_mode() {
     # 等待用户按键
     read -n 1 -s
 
+    # 清除临时trap
+    trap - INT TERM
+
     # 停止服务
     pkill -f "iperf3.*-s.*-p.*$TARGET_PORT" 2>/dev/null
     echo ""
-    echo -e "${GREEN}服务已停止${NC}"
+    echo -e "${GREEN}iperf3服务已停止${NC}"
+
+    # 恢复被临时停止的进程
+    restore_stopped_process
 }
 
 # 执行延迟测试
@@ -567,9 +756,9 @@ run_tcp_single_thread_test() {
     echo -e "${GREEN}🚀 TCP上行带宽测试 - 目标: ${TARGET_IP}:${TARGET_PORT}${NC}"
     echo ""
 
-    # 后台执行测试，前台显示进度条
+    # 后台执行iperf3，前台显示倒计时
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M -V 2>&1 > "$temp_result") &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP单线程测试"
@@ -577,6 +766,17 @@ run_tcp_single_thread_test() {
     # 等待测试完成
     wait $test_pid
     local exit_code=$?
+
+    # 首次失败快速重试一次（针对首连接冷关闭问题）
+    if [ $exit_code -ne 0 ]; then
+        sleep 0.5
+        : > "$temp_result"
+        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M > "$temp_result" 2>&1) &
+        local test_pid2=$!
+        show_progress_bar "$TEST_DURATION" "TCP单线程测试"
+        wait $test_pid2
+        exit_code=$?
+    fi
 
     if [ $exit_code -eq 0 ]; then
         local result=$(cat "$temp_result")
@@ -605,7 +805,7 @@ run_tcp_single_thread_test() {
             fi
 
             echo -e "${GREEN}TCP上行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f M -V${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f M${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
@@ -690,6 +890,10 @@ run_bandwidth_tests() {
         return
     fi
 
+    # 预热：快速建立控制通道，提升首项成功率（输出丢弃，不影响报告）
+    iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t 1 -f M >/dev/null 2>&1 || true
+    sleep 1
+
     # 执行TCP上行测试
     run_tcp_single_thread_test
 
@@ -724,13 +928,11 @@ run_udp_single_test() {
         udp_bandwidth="${TCP_MBPS}M"
     fi
 
-    # 后台执行测试，前台显示进度条
+    # 后台执行iperf3，前台显示倒计时
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f M -V 2>&1 > "$temp_result") &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f M > "$temp_result" 2>&1) &
     local test_pid=$!
-
     show_progress_bar "$TEST_DURATION" "UDP单线程测试"
-
     # 等待测试完成
     wait $test_pid
     local exit_code=$?
@@ -751,7 +953,7 @@ run_udp_single_test() {
             local final_bitrate=$(parse_iperf3_data "$sender_line" "bitrate")
 
             echo -e "${GREEN}UDP上行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f M -V${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f M${NC}"
             echo ""
             echo -e "${YELLOW}📡 传输统计${NC}"
             echo ""
@@ -821,7 +1023,7 @@ run_tcp_download_test() {
 
     # 后台执行测试，前台显示进度条
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M -V -R 2>&1 > "$temp_result") &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M -R > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP下行测试"
@@ -862,7 +1064,7 @@ run_tcp_download_test() {
             fi
 
             echo -e "${GREEN}TCP下行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f M -V -R${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f M -R${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
@@ -938,7 +1140,7 @@ run_udp_download_test() {
 
     # 后台执行测试，前台显示进度条
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f M -V -R 2>&1 > "$temp_result") &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f M -R > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "UDP下行测试"
@@ -960,7 +1162,7 @@ run_udp_download_test() {
 
         if [ -n "$sender_line" ]; then
             echo -e "${GREEN}UDP下行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f M -V -R${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f M -R${NC}"
             echo ""
             echo -e "${YELLOW}📡 传输统计${NC}"
             echo ""
@@ -2027,11 +2229,12 @@ show_main_menu() {
     echo -e "${GREEN}1.${NC} 客户端 (本机发起测试)"
     echo -e "${BLUE}2.${NC} 服务端 (开放测试)"
     echo -e "${RED}3.${NC} 卸载脚本"
-    echo -e "${YELLOW}4.${NC} 返回中转脚本"
+    echo -e "${YELLOW}4.${NC} 更新脚本"
+    echo -e "${WHITE}5.${NC} 返回中转脚本"
     echo ""
 
     while true; do
-        read -p "请输入选择 [1-4]: " choice
+        read -p "请输入选择 [1-5]: " choice
         case $choice in
             1)
                 ROLE="relay"
@@ -2047,14 +2250,93 @@ show_main_menu() {
                 uninstall_speedtest
                 ;;
             4)
+                manual_update_script
+                show_main_menu
+                ;;
+            5)
                 echo -e "${BLUE}返回中转脚本主菜单...${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-4${NC}"
+                echo -e "${RED}无效选择，请输入 1-5${NC}"
                 ;;
         esac
     done
+}
+
+# 手动更新脚本
+manual_update_script() {
+    clear
+    echo ""
+
+    # 获取当前脚本路径
+    local current_script="$0"
+
+    echo -e "${YELLOW}将下载最新版本覆盖当前脚本${NC}"
+    echo -e "${BLUE}当前脚本路径: $current_script${NC}"
+    echo ""
+
+    read -p "确认更新脚本？(y/N): " confirm
+    if [[ ! $confirm =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}取消更新${NC}"
+        echo ""
+        echo -e "${WHITE}按任意键返回主菜单...${NC}"
+        read -n 1 -s
+        return
+    fi
+
+    echo ""
+    echo -e "${GREEN}正在更新测速脚本...${NC}"
+
+    # 从GitHub下载最新版本
+    echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
+
+    local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
+    local download_success=false
+    local sources=(
+        ""  # 官方源
+        "https://proxy.vvvv.ee/"
+        "https://demo.52013120.xyz/"
+        "https://ghfast.top/"
+    )
+
+    for proxy in "${sources[@]}"; do
+        local full_url="${proxy}${script_url}"
+        local source_name
+
+        if [ -z "$proxy" ]; then
+            source_name="GitHub官方源"
+        else
+            source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+        fi
+
+        echo -e "${BLUE}尝试 $source_name${NC}"
+
+        if curl -fsSL "$full_url" -o "$current_script" 2>/dev/null; then
+            chmod +x "$current_script"
+            echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
+            download_success=true
+            break
+        else
+            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+        fi
+    done
+
+    echo ""
+    if [ "$download_success" = true ]; then
+        echo -e "${GREEN}✅ 脚本更新完成${NC}"
+        echo -e "${YELLOW}重新启动脚本以使用最新版本${NC}"
+        echo ""
+        echo -e "${WHITE}按任意键重新启动脚本...${NC}"
+        read -n 1 -s
+        exec "$current_script"
+    else
+        echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
+        echo -e "${BLUE}继续使用现有脚本版本${NC}"
+        echo ""
+        echo -e "${WHITE}按任意键返回主菜单...${NC}"
+        read -n 1 -s
+    fi
 }
 
 # 自动更新脚本 (由xwPF.sh调用时执行)
@@ -2109,9 +2391,6 @@ auto_update_script() {
 # 主函数
 main() {
     check_root
-
-    # 自动更新脚本
-    auto_update_script
 
     # 检测工具状态并安装缺失的工具
     install_required_tools
