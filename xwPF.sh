@@ -33,6 +33,14 @@ BLUE='\033[0;34m'     # 信息、标识、中性操作
 WHITE='\033[1;37m'    # 关闭状态、默认文本
 NC='\033[0m'          # 重置颜色
 
+# 全局多源下载配置
+DOWNLOAD_SOURCES=(
+    ""  # 官方源
+    "https://proxy.vvvv.ee/"
+    "https://demo.52013120.xyz/"
+    "https://ghfast.top/"
+)
+
 # 核心路径变量
 REALM_PATH="/usr/local/bin/realm"
 CONFIG_DIR="/etc/realm"
@@ -1460,8 +1468,6 @@ validate_config_package_content() {
     echo "$config_dir"
     return 0
 }
-
-
 
 # 导入配置包
 import_config_package() {
@@ -4510,21 +4516,15 @@ install_realm_from_local_package() {
     fi
 }
 
-# 多源下载策略
-download_with_fallback() {
-    local base_url="$1"
-    local filename="$2"
+# 统一多源下载函数
+download_from_sources() {
+    local url="$1"
+    local target_path="$2"
+    local timeout="${3:-30}"
+    local connect_timeout="${4:-10}"
 
-    local sources=(
-        ""  # 官方源
-        "https://proxy.vvvv.ee/"
-        "https://demo.52013120.xyz/"
-        "https://ghfast.top/"
-    )
-
-    # 依次尝试各个源
-    for proxy in "${sources[@]}"; do
-        local full_url="${proxy}${base_url}"
+    for proxy in "${DOWNLOAD_SOURCES[@]}"; do
+        local full_url="${proxy}${url}"
         local source_name
 
         if [ -z "$proxy" ]; then
@@ -4533,21 +4533,40 @@ download_with_fallback() {
             source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
         fi
 
-        echo -e "${BLUE}正在尝试 $source_name${NC}" >&2
+        echo -e "${BLUE}尝试 $source_name${NC}"
 
-        # 使用现有的reliable_download函数判断成功/失败
-        local download_result
-        if download_result=$(reliable_download "$full_url" "$filename"); then
-            echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
-            echo "$download_result"  # 返回文件路径
+        if curl -fsSL --connect-timeout "$connect_timeout" --max-time "$timeout" "$full_url" -o "$target_path"; then
+            echo -e "${GREEN}✓ $source_name 下载成功${NC}"
             return 0
         else
-            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}" >&2
+            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
         fi
     done
 
-    echo -e "${RED}✗ 所有下载源均失败${NC}" >&2
+    echo -e "${RED}✗ 所有下载源均失败${NC}"
     return 1
+}
+
+# 多源下载策略（保持向后兼容）
+download_with_fallback() {
+    local base_url="$1"
+    local filename="$2"
+
+    # 确定工作目录
+    local work_dir=$(get_work_dir)
+    if [ "$work_dir" = "." ]; then
+        work_dir="$(pwd)"
+    fi
+
+    local file_path="${work_dir}/${filename}"
+
+    # 使用统一的多源下载函数
+    if download_from_sources "$base_url" "$file_path" 30 10; then
+        echo "$file_path"  # 返回文件路径
+        return 0
+    else
+        return 1
+    fi
 }
 
 # 简洁高效的下载函数
@@ -5786,39 +5805,11 @@ self_install() {
         echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
         local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
 
-        # 使用多源下载脚本
-        local sources=(
-            ""  # 官方源
-            "https://proxy.vvvv.ee/"
-            "https://demo.52013120.xyz/"
-            "https://ghfast.top/"
-        )
-
-        local download_success=false
-        for proxy in "${sources[@]}"; do
-            local script_url="${proxy}${base_script_url}"
-            local source_name
-
-            if [ -z "$proxy" ]; then
-                source_name="GitHub官方源"
-            else
-                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
-            fi
-
-            echo -e "${BLUE}尝试 $source_name${NC}"
-
-            if curl -fsSL "$script_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
-                chmod +x "${install_dir}/${script_name}"
-                echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
-                download_success=true
-                break
-            else
-                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
-            fi
-        done
-
-        if [ "$download_success" = false ]; then
-            echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
+        # 使用统一多源下载函数
+        if download_from_sources "$base_script_url" "${install_dir}/${script_name}" 30 10; then
+            chmod +x "${install_dir}/${script_name}"
+        else
+            echo -e "${RED}✗ 脚本更新失败${NC}"
             echo -e "${BLUE}使用现有脚本版本${NC}"
         fi
     elif [ -f "$0" ]; then
@@ -5831,39 +5822,11 @@ self_install() {
         echo -e "${BLUE}正在从GitHub下载脚本...${NC}"
         local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
 
-        # 使用多源下载脚本
-        local sources=(
-            ""  # 官方源
-            "https://proxy.vvvv.ee/"
-            "https://demo.52013120.xyz/"
-            "https://ghfast.top/"
-        )
-
-        local download_success=false
-        for proxy in "${sources[@]}"; do
-            local script_url="${proxy}${base_script_url}"
-            local source_name
-
-            if [ -z "$proxy" ]; then
-                source_name="GitHub官方源"
-            else
-                source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
-            fi
-
-            echo -e "${BLUE}尝试 $source_name${NC}"
-
-            if curl -fsSL "$script_url" -o "${install_dir}/${script_name}" 2>/dev/null; then
-                chmod +x "${install_dir}/${script_name}"
-                echo -e "${GREEN}✓ $source_name 脚本下载成功${NC}"
-                download_success=true
-                break
-            else
-                echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
-            fi
-        done
-
-        if [ "$download_success" = false ]; then
-            echo -e "${RED}✗ 所有源脚本下载均失败${NC}"
+        # 使用统一多源下载函数
+        if download_from_sources "$base_script_url" "${install_dir}/${script_name}" 30 10; then
+            chmod +x "${install_dir}/${script_name}"
+        else
+            echo -e "${RED}✗ 脚本下载失败${NC}"
             return 1
         fi
     fi
@@ -7319,61 +7282,34 @@ download_speedtest_script() {
     local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
     local target_path="/etc/realm/speedtest.sh"
 
-    echo -e "${YELLOW}首次使用测速功能，正在下载测速脚本...${NC}"
+    echo -e "${GREEN}正在下载最新版测速脚本...${NC}"
 
     # 创建目录
     mkdir -p "$(dirname "$target_path")"
 
-    # 使用多源下载机制
-    local sources=(
-        ""  # 官方源
-        "https://proxy.vvvv.ee/"
-        "https://ghproxy.com/"
-    )
-
-    local download_success=false
-    for prefix in "${sources[@]}"; do
-        local full_url="${prefix}${script_url}"
-        echo -e "${BLUE}尝试下载: ${full_url}${NC}"
-
-        if curl -fsSL --connect-timeout 10 --max-time 30 "$full_url" -o "$target_path"; then
-            chmod +x "$target_path"
-            echo -e "${GREEN}✓ 测速脚本下载成功${NC}"
-            download_success=true
-            break
-        else
-            echo -e "${RED}✗ 下载失败，尝试下一个源...${NC}"
-        fi
-    done
-
-    if [ "$download_success" = false ]; then
-        echo -e "${RED}✗ 所有下载源均失败，请检查网络连接${NC}"
+    # 使用统一多源下载函数
+    if download_from_sources "$script_url" "$target_path" 30 10; then
+        chmod +x "$target_path"
+        return 0
+    else
+        echo -e "${RED}请检查网络连接${NC}"
         return 1
     fi
-
-    return 0
 }
 
 # 中转网络链路测试菜单
 speedtest_menu() {
     local speedtest_script="/etc/realm/speedtest.sh"
 
-    # 检查测速脚本是否存在
-    if [ ! -f "$speedtest_script" ]; then
-        if ! download_speedtest_script; then
-            echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
-            read -p "按回车键返回主菜单..."
-            return 1
-        fi
-    fi
-
-    # 检查脚本是否可执行
-    if [ ! -x "$speedtest_script" ]; then
-        chmod +x "$speedtest_script"
+    # 每次都下载最新版本
+    if ! download_speedtest_script; then
+        echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
+        read -p "按回车键返回主菜单..."
+        return 1
     fi
 
     # 调用测速脚本
-    echo -e "${BLUE}启动中转工具...${NC}"
+    echo -e "${BLUE}启动测速工具...${NC}"
     echo ""
     bash "$speedtest_script"
 
