@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 脚本版本
+SCRIPT_VERSION="v1.5.0"
+
 # 全局变量声明
 ROLE=""
 NAT_LISTEN_PORT=""
@@ -13,10 +16,11 @@ FORWARD_PORT=""
 FORWARD_TARGET=""  #支持多地址和域名
 
 # 配置变量
-SECURITY_LEVEL=""  # 传输模式：standard, tls_self, tls_ca
+SECURITY_LEVEL=""  # 传输模式：standard, ws, tls_self, tls_ca, ws_tls_self, ws_tls_ca
 TLS_CERT_PATH=""   # TLS证书路径
 TLS_KEY_PATH=""    # TLS私钥路径
 TLS_SERVER_NAME="" # TLS服务器名称(SNI)
+WS_PATH=""         # WebSocket路径
 
 RULE_ID=""
 RULE_NAME=""
@@ -203,7 +207,7 @@ write_manager_conf() {
 
 ROLE=$ROLE
 INSTALL_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
-SCRIPT_VERSION="v1.0.0"
+# 使用全局版本变量
 
 # 中转服务器配置
 NAT_LISTEN_PORT=$NAT_LISTEN_PORT
@@ -452,6 +456,17 @@ get_transport_config() {
         "standard")
             echo ""
             ;;
+        "ws")
+            # WebSocket配置
+            local ws_path_param="${ws_path:-/ws}"
+            if [ "$role" = "1" ]; then
+                # 中转服务器(客户端): WebSocket连接
+                echo '"remote_transport": "ws;path='$ws_path_param'"'
+            elif [ "$role" = "2" ]; then
+                # 出口服务器(服务端): WebSocket监听
+                echo '"listen_transport": "ws;path='$ws_path_param'"'
+            fi
+            ;;
         "tls_self")
             # TLS自签证书配置
             local sni_name="${server_name:-$DEFAULT_SNI_DOMAIN}"
@@ -670,8 +685,10 @@ read_rule_file() {
     local rule_file="$1"
     if [ -f "$rule_file" ]; then
         source "$rule_file"
-        # 向后兼容：为旧规则文件设置默认备注
+        # 向后兼容：为旧规则文件设置默认值
         RULE_NOTE="${RULE_NOTE:-}"
+        MPTCP_MODE="${MPTCP_MODE:-off}"
+        PROXY_MODE="${PROXY_MODE:-off}"
         return 0
     else
         return 1
@@ -1050,6 +1067,12 @@ HEALTH_CHECK_INTERVAL="4"
 FAILURE_THRESHOLD="2"
 SUCCESS_THRESHOLD="2"
 CONNECTION_TIMEOUT="3"
+
+# MPTCP配置
+MPTCP_MODE="off"
+
+# Proxy配置
+PROXY_MODE="off"
 EOF
 
         echo -e "${GREEN}✓ 中转配置已创建 (ID: $rule_id)${NC}"
@@ -1083,6 +1106,12 @@ HEALTH_CHECK_INTERVAL="4"
 FAILURE_THRESHOLD="2"
 SUCCESS_THRESHOLD="2"
 CONNECTION_TIMEOUT="3"
+
+# MPTCP配置
+MPTCP_MODE="off"
+
+# Proxy配置
+PROXY_MODE="off"
 EOF
 
         echo -e "${GREEN}✓ 转发配置已创建 (ID: $rule_id)${NC}"
@@ -1252,727 +1281,250 @@ toggle_rule() {
     fi
 }
 
-# JSON配置转换为规则文件
-import_json_to_rules() {
-    local json_file="$1"
+# 生成导出元数据文件
+generate_export_metadata() {
+    local metadata_file="$1"
+    local rules_count="$2"
 
-    if [ ! -f "$json_file" ]; then
-        echo -e "${RED}配置文件不存在${NC}"
-        return 1
-    fi
-
-    # 清理现有规则
-    echo -e "${BLUE}正在清理现有规则...${NC}"
-    if [ -d "$RULES_DIR" ]; then
-        rm -f "${RULES_DIR}"/rule-*.conf 2>/dev/null
-    fi
-
-    # 初始化规则目录
-    init_rules_dir
-
-    # 提取endpoints信息（支持负载均衡）
-    local temp_file=$(mktemp)
-
-    # 使用Python提取完整的endpoints信息（增强）
-    local python_cmd=""
-    if command -v python3 >/dev/null 2>&1; then
-        python_cmd="python3"
-    elif command -v python >/dev/null 2>&1; then
-        python_cmd="python"
-    fi
-
-    if [ -n "$python_cmd" ]; then
-        $python_cmd -c "
-import json
-import sys
-import re
-
-try:
-    with open('$json_file', 'r') as f:
-        data = json.load(f)
-
-    if 'endpoints' in data:
-        for i, endpoint in enumerate(data['endpoints']):
-            listen = endpoint.get('listen', '')
-            remote = endpoint.get('remote', '')
-            extra_remotes = endpoint.get('extra_remotes', [])
-            balance = endpoint.get('balance', '')
-            listen_transport = endpoint.get('listen_transport', '')
-            remote_transport = endpoint.get('remote_transport', '')
-            through = endpoint.get('through', '')
-
-            if listen and remote:
-                # 判断服务器角色
-                role = '2' if listen_transport else '1'  # listen_transport存在=落地服务器
-
-                # 处理监听IP（落地服务器强制改为::）
-                if role == '2':
-                    # 落地服务器：提取端口，IP改为::
-                    port_match = re.search(r':(\d+)$', listen)
-                    if port_match:
-                        listen = '::' + ':' + port_match.group(1)
-
-                # 构建完整的目标列表
-                targets = [remote]
-                if extra_remotes:
-                    targets.extend(extra_remotes)
-
-                target_list = ','.join(targets)
-
-                # 解析权重信息
-                weights_str = ''
-                if balance:
-                    # 提取权重：支持 roundrobin: 2,3,1 或 iphash: 1,2,3 格式
-                    weight_match = re.search(r'(?:roundrobin|iphash):\s*([0-9,\s]+)', balance)
-                    if weight_match:
-                        weights_str = weight_match.group(1).replace(' ', '')
-
-                # 如果没有权重信息，根据服务器数量生成默认权重
-                if not weights_str:
-                    weights_str = ','.join(['1'] * len(targets))
-
-                # 输出格式：监听地址|远程地址|目标列表|负载均衡|角色|监听传输|远程传输|权重|出口地址
-                # 输出格式：listen|remote|target_list|balance|role|listen_transport|remote_transport|weights|through
-                print('{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}'.format(
-                    listen, remote, target_list, balance, role, listen_transport, remote_transport, weights_str, through))
-except Exception as e:
-    sys.exit(1)
-" > "$temp_file"
-    else
-        # 回退到简化方法（增强）
-        awk '
-            BEGIN {
-                in_endpoint = 0; transport_buffer = ""
-                extra_count = 0; collecting_extra = 0
-            }
-
-            /"endpoints":/ { in_endpoints = 1 }
-            /^\s*{/ && in_endpoints { in_endpoint = 1 }
-
-            /"listen":/ && in_endpoint {
-                gsub(/[",]/, "", $2);
-                listen = $2
-            }
-            /"remote":/ && in_endpoint {
-                gsub(/[",]/, "", $2);
-                remote = $2
-            }
-            /"through":/ && in_endpoint {
-                gsub(/[",]/, "", $2);
-                through = $2
-            }
-            /"extra_remotes":/ && in_endpoint {
-                has_extra = 1
-                # 开始计算extra_remotes数量
-                extra_count = 0
-                collecting_extra = 1
-            }
-
-            # 计算extra_remotes中的服务器数量
-            collecting_extra && /"[^"]*:[0-9]+"/ {
-                # 匹配IP:端口格式，计算数量
-                line_content = $0
-                while (match(line_content, /"[^"]*:[0-9]+"/, matched)) {
-                    extra_count++
-                    line_content = substr(line_content, RSTART + RLENGTH)
-                }
-            }
-
-            /^\s*\]/ && collecting_extra {
-                collecting_extra = 0
-            }
-            /"balance":/ && in_endpoint {
-                gsub(/[",]/, "", $2);
-                balance = $2
-            }
-
-            # 处理多行传输配置
-            /"listen_transport":/ && in_endpoint {
-                transport_buffer = $0
-                # 如果传输配置在同一行
-                if (match($0, /"listen_transport":\s*"([^"]*)"/, arr)) {
-                    listen_transport = arr[1]
-                    role = "2"
-                    transport_buffer = ""
-                } else {
-                    # 开始收集多行传输配置
-                    gsub(/.*"listen_transport":\s*"/, "", transport_buffer)
-                    collecting_listen_transport = 1
-                }
-            }
-
-            /"remote_transport":/ && in_endpoint {
-                transport_buffer = $0
-                # 如果传输配置在同一行
-                if (match($0, /"remote_transport":\s*"([^"]*)"/, arr)) {
-                    remote_transport = arr[1]
-                    transport_buffer = ""
-                } else {
-                    # 开始收集多行传输配置
-                    gsub(/.*"remote_transport":\s*"/, "", transport_buffer)
-                    collecting_remote_transport = 1
-                }
-            }
-
-            # 收集多行传输配置
-            collecting_listen_transport && !/"listen_transport":/ {
-                transport_buffer = transport_buffer $0
-                if (/"$/) {
-                    gsub(/".*/, "", transport_buffer)
-                    listen_transport = transport_buffer
-                    role = "2"
-                    collecting_listen_transport = 0
-                    transport_buffer = ""
-                }
-            }
-
-            collecting_remote_transport && !/"remote_transport":/ {
-                transport_buffer = transport_buffer $0
-                if (/"$/) {
-                    gsub(/".*/, "", transport_buffer)
-                    remote_transport = transport_buffer
-                    collecting_remote_transport = 0
-                    transport_buffer = ""
-                }
-            }
-
-            /^\s*}/ && in_endpoint && listen && remote {
-                if (!role) role = "1"  # 默认中转服务器
-
-                # 落地服务器监听IP改为::
-                if (role == "2") {
-                    if (match(listen, /:([0-9]+)$/, port_arr)) {
-                        listen = "::" ":" port_arr[1]
-                    }
-                }
-
-                extra_info = ""
-                if (has_extra) extra_info = "LB"
-
-                # 解析权重信息
-                weights_str = ""
-                if (balance != "") {
-                    # 提取权重：支持 "roundrobin: 2,3,1" 或 "iphash: 1,2,3" 格式
-                    if (match(balance, /(roundrobin|iphash):\s*([0-9,\s]+)/, weight_match)) {
-                        weights_str = weight_match[2]
-                        gsub(/\s/, "", weights_str)  # 移除空格
-                    }
-                }
-
-                # 如果没有权重信息，根据目标数量生成默认权重
-                if (weights_str == "") {
-                    # 计算实际目标数量：main + extra_remotes
-                    target_count = 1 + extra_count  # main remote + extra_remotes数量
-
-                    weights_str = "1"
-                    for (i = 2; i <= target_count; i++) {
-                        weights_str = weights_str ",1"
-                    }
-                }
-
-                # 输出格式：监听地址|远程地址|扩展信息|负载均衡|角色|监听传输|远程传输|权重|出口地址
-                print listen "|" remote "|" extra_info "|" balance "|" role "|" listen_transport "|" remote_transport "|" weights_str "|" through
-
-                # 重置变量
-                listen = ""; remote = ""; through = ""; has_extra = 0; balance = ""; role = ""
-                listen_transport = ""; remote_transport = ""; extra_count = 0
-                collecting_extra = 0; in_endpoint = 0
-            }
-        ' "$json_file" > "$temp_file"
-    fi
-
-    if [ ! -s "$temp_file" ]; then
-        rm -f "$temp_file"
-        echo -e "${RED}无法解析配置文件${NC}"
-        return 1
-    fi
-
-    local rule_count=0
-    local rule_id=1
-
-    # 逐行处理endpoints（增强）
-    while IFS='|' read -r listen_addr remote_addr target_list balance_config rule_role listen_transport remote_transport weights_str through_addr; do
-        [ -z "$listen_addr" ] || [ -z "$remote_addr" ] && continue
-
-        # 解析监听地址和端口
-        local listen_port=$(echo "$listen_addr" | sed 's/.*://')
-        if [ -z "$listen_port" ] || ! echo "$listen_port" | grep -qE "^[0-9]+$"; then
-            continue
-        fi
-
-        # 提取监听IP
-        local listen_ip=$(echo "$listen_addr" | sed 's/:[0-9]*$//')
-
-        # 设置默认角色
-        [ -z "$rule_role" ] && rule_role="1"
-
-        # 解析负载均衡配置
-        local balance_mode="off"
-        if [ -n "$balance_config" ]; then
-            if echo "$balance_config" | grep -q "roundrobin"; then
-                balance_mode="roundrobin"
-            elif echo "$balance_config" | grep -q "iphash"; then
-                balance_mode="iphash"
-            fi
-        fi
-
-        # 解析目标列表和权重
-        IFS=',' read -ra targets <<< "$target_list"
-        local weight_array=()
-
-        # 解析权重字符串
-        if [ -n "$weights_str" ]; then
-            IFS=',' read -ra weight_array <<< "$weights_str"
-        fi
-
-        # 确保权重数组与目标数组长度一致
-        while [ ${#weight_array[@]} -lt ${#targets[@]} ]; do
-            weight_array+=("1")  # 补充默认权重
-        done
-
-        local target_index=0
-        local has_multiple_targets=false
-        if [ ${#targets[@]} -gt 1 ]; then
-            has_multiple_targets=true
-            echo -e "${BLUE}提示：检测到${#targets[@]}个服务器，权重配置：${weights_str}${NC}"
-
-            # 方案2：将完整权重存储到第一个规则中
-            local first_rule_weights="$weights_str"
-        fi
-
-        for target in "${targets[@]}"; do
-            target=$(echo "$target" | xargs)  # 去除空格
-            [ -z "$target" ] && continue
-
-            # 解析远程地址和端口
-            local remote_host=$(echo "$target" | sed 's/:[0-9]*$//')
-            local remote_port=$(echo "$target" | sed 's/.*://')
-            if [ -z "$remote_host" ] || [ -z "$remote_port" ] || ! echo "$remote_port" | grep -qE "^[0-9]+$"; then
-                continue
-            fi
-
-            # 生成规则名称
-            local rule_name="中转"
-            if [ "$rule_role" = "2" ]; then
-                rule_name="落地"
-            fi
-
-            # 获取当前目标的权重
-            local current_weight="${weight_array[$target_index]:-1}"
-
-            # 解析传输配置
-            local security_level="standard"
-            local tls_server_name=""
-            local tls_cert_path=""
-            local tls_key_path=""
-            local ws_path="/ws"
-
-            # 处理传输配置
-            local transport_config=""
-            if [ "$rule_role" = "2" ] && [ -n "$listen_transport" ]; then
-                # 落地服务器：解析listen_transport
-                transport_config="$listen_transport"
-            elif [ "$rule_role" = "1" ] && [ -n "$remote_transport" ]; then
-                # 中转服务器：解析remote_transport
-                transport_config="$remote_transport"
-            fi
-
-            # 解析传输配置字段
-            if [ -n "$transport_config" ]; then
-                # 检测传输类型并映射到正确的安全级别字符串
-                # 优先使用自签证书模式，因为导入配置通常没有证书文件路径
-                if echo "$transport_config" | grep -q "ws" && echo "$transport_config" | grep -q "tls"; then
-                    # WebSocket + TLS - 统一使用自签模式
-                    security_level="ws_tls_self"
-                elif echo "$transport_config" | grep -q "tls"; then
-                    # 纯TLS - 统一使用自签模式
-                    security_level="tls_self"
-                else
-                    security_level="standard"         # 默认传输
-                fi
-
-                # 提取SNI/servername
-                if echo "$transport_config" | grep -q "sni="; then
-                    tls_server_name=$(echo "$transport_config" | sed -n 's/.*sni=\([^;]*\).*/\1/p')
-                elif echo "$transport_config" | grep -q "servername="; then
-                    tls_server_name=$(echo "$transport_config" | sed -n 's/.*servername=\([^;]*\).*/\1/p')
-                fi
-
-                # 提取WebSocket路径
-                if echo "$transport_config" | grep -q "path="; then
-                    ws_path=$(echo "$transport_config" | sed -n 's/.*path=\([^;]*\).*/\1/p')
-                fi
-
-                # 提取证书路径（如果有）
-                if echo "$transport_config" | grep -q "cert="; then
-                    tls_cert_path=$(echo "$transport_config" | sed -n 's/.*cert=\([^;]*\).*/\1/p')
-                fi
-                if echo "$transport_config" | grep -q "key="; then
-                    tls_key_path=$(echo "$transport_config" | sed -n 's/.*key=\([^;]*\).*/\1/p')
-                fi
-            fi
-
-            # 创建规则文件
-            local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
-            cat > "$rule_file" <<EOF
-# Realm 转发规则配置文件 (导入)
-# 规则ID: $rule_id
-# 创建时间: $(get_gmt8_time '+%Y-%m-%d %H:%M:%S')
-
-RULE_ID=$rule_id
-RULE_NAME="$rule_name"
-RULE_ROLE="$rule_role"
-SECURITY_LEVEL="$security_level"
-LISTEN_PORT="$listen_port"
-LISTEN_IP="$listen_ip"
-THROUGH_IP="${through_addr:-::}"
-REMOTE_HOST="$remote_host"
-REMOTE_PORT="$remote_port"
-TLS_SERVER_NAME="$tls_server_name"
-TLS_CERT_PATH="$tls_cert_path"
-TLS_KEY_PATH="$tls_key_path"
-WS_PATH="$ws_path"
-RULE_NOTE=""
-ENABLED="true"
-CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
-
-# 负载均衡配置
-BALANCE_MODE="$balance_mode"
-TARGET_STATES=""
-WEIGHTS="$([ "$target_index" -eq 0 ] && [ -n "$first_rule_weights" ] && echo "$first_rule_weights" || echo "$current_weight")"
+    cat > "$metadata_file" <<EOF
+# xwPF配置包元数据
+EXPORT_TIME=$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')
+SCRIPT_VERSION=$SCRIPT_VERSION
+EXPORT_HOST=$(hostname 2>/dev/null || echo "unknown")
+RULES_COUNT=$rules_count
+HAS_MANAGER_CONF=$([ -f "$MANAGER_CONF" ] && echo "true" || echo "false")
+HAS_HEALTH_STATUS=$([ -f "$HEALTH_STATUS_FILE" ] && echo "true" || echo "false")
+PACKAGE_VERSION=1.0
 EOF
-
-            # 落地服务器需要添加FORWARD_TARGET字段
-            if [ "$rule_role" = "2" ]; then
-                echo "FORWARD_TARGET=\"$remote_host:$remote_port\"" >> "$rule_file"
-            fi
-
-            # 添加故障转移配置
-            cat >> "$rule_file" <<EOF
-
-# 故障转移配置
-FAILOVER_ENABLED="false"
-HEALTH_CHECK_INTERVAL="4"
-FAILURE_THRESHOLD="2"
-SUCCESS_THRESHOLD="2"
-CONNECTION_TIMEOUT="3"
-EOF
-
-            if [ -f "$rule_file" ]; then
-                rule_count=$((rule_count + 1))
-                local role_text="中转"
-                [ "$rule_role" = "2" ] && role_text="落地"
-                local weight_info=""
-                if [ "$has_multiple_targets" = true ]; then
-                    weight_info=" (权重: $current_weight)"
-                fi
-                echo -e "${GREEN}✓${NC} 创建${role_text}规则 $rule_id: $listen_port → $remote_host:$remote_port$weight_info"
-            else
-                echo -e "${RED}✗${NC} 创建规则 $rule_id 失败"
-            fi
-
-            rule_id=$((rule_id + 1))
-            target_index=$((target_index + 1))
-        done
-    done < "$temp_file"
-
-    rm -f "$temp_file"
-
-    if [ $rule_count -gt 0 ]; then
-        echo -e "${GREEN}成功导入 $rule_count 个规则${NC}"
-        return 0
-    else
-        echo -e "${RED}未能导入任何规则${NC}"
-        return 1
-    fi
 }
 
-# 导入配置文件
-import_config_file() {
-    echo -e "${YELLOW}=== 导入配置文件 ===${NC}"
+# 导出配置包
+export_config_package() {
+    echo -e "${YELLOW}=== 导出配置包 ===${NC}"
     echo ""
 
-    # 获取脚本工作目录（智能搜索）
-    local script_dir=$(get_best_script_dir)
-
-    # 扫描脚本工作目录下的.json文件
-    echo -e "${BLUE}正在扫描配置文件...${NC}"
-    local json_files=()
-    while IFS= read -r -d '' file; do
-        json_files+=("$file")
-    done < <(find "$script_dir" -maxdepth 1 -name "*.json" -type f -print0 2>/dev/null)
-
-    # 检查是否找到文件
-    if [ ${#json_files[@]} -eq 0 ]; then
-        echo -e "${YELLOW}未在脚本工作目录下找到 .json 配置文件${NC}"
-        echo -e "${BLUE}脚本工作目录: $script_dir${NC}"
-        echo ""
-        echo -e "${GREEN}请输入配置文件的完整路径:${NC}"
-        read -p "文件路径: " user_file_path
-        echo ""
-
-        # 验证用户输入的文件路径
-        if [ -z "$user_file_path" ]; then
-            echo -e "${BLUE}已取消操作${NC}"
-            read -p "按回车键返回..."
-            return
-        fi
-
-        if [ ! -f "$user_file_path" ]; then
-            echo -e "${RED}文件不存在: $user_file_path${NC}"
-            read -p "按回车键返回..."
-            return
-        fi
-
-        if [[ ! "$user_file_path" =~ \.json$ ]]; then
-            echo -e "${RED}文件必须是 .json 格式${NC}"
-            read -p "按回车键返回..."
-            return
-        fi
-
-        # 使用用户输入的文件
-        local selected_file="$user_file_path"
-        local filename=$(basename "$selected_file")
-        echo -e "${BLUE}选择的文件: $filename${NC}"
-        echo ""
-    else
-        # 显示找到的文件
-        echo -e "${GREEN}找到以下配置文件:${NC}"
-        for i in "${!json_files[@]}"; do
-            local filename=$(basename "${json_files[$i]}")
-            echo -e "${GREEN}$((i+1)).${NC} $filename"
-        done
-        echo ""
-
-        # 用户选择文件
-        echo -e "${BLUE}请选择文件编号 [1-${#json_files[@]}] 或输入配置文件的完整路径(如/zywe/*.json):${NC}"
-        read -p "选择: " file_choice
-        echo ""
-
-        local selected_file=""
-        local filename=""
-
-        # 检查是否是数字编号
-        if echo "$file_choice" | grep -qE "^[0-9]+$"; then
-            # 数字编号选择
-            if [ "$file_choice" -lt 1 ] || [ "$file_choice" -gt ${#json_files[@]} ]; then
-                echo -e "${RED}无效编号${NC}"
-                read -p "按回车键返回..."
-                return
-            fi
-            selected_file="${json_files[$((file_choice-1))]}"
-            filename=$(basename "$selected_file")
-        else
-            # 文件路径输入
-            if [ -z "$file_choice" ]; then
-                echo -e "${BLUE}已取消操作${NC}"
-                read -p "按回车键返回..."
-                return
-            fi
-
-            if [ ! -f "$file_choice" ]; then
-                echo -e "${RED}文件不存在: $file_choice${NC}"
-                read -p "按回车键返回..."
-                return
-            fi
-
-            if [[ ! "$file_choice" =~ \.json$ ]]; then
-                echo -e "${RED}文件必须是 .json 格式${NC}"
-                read -p "按回车键返回..."
-                return
-            fi
-
-            selected_file="$file_choice"
-            filename=$(basename "$selected_file")
-        fi
-
-        echo -e "${BLUE}选择的文件: $filename${NC}"
-        echo ""
+    # 检查是否有可导出的配置
+    local rules_count=0
+    if [ -d "$RULES_DIR" ]; then
+        rules_count=$(find "$RULES_DIR" -name "rule-*.conf" -type f 2>/dev/null | wc -l)
     fi
 
-    # 快速格式检查
-    echo -e "${YELLOW}正在检查配置文件格式...${NC}"
-    if ! grep -q '"endpoints"' "$selected_file" || \
-       ! grep -q '"listen"' "$selected_file" || \
-       ! grep -q '"remote"' "$selected_file"; then
-        echo -e "${RED}检查配置文件有误，建议使用脚本重新生成${NC}"
+    local has_manager_conf=false
+    [ -f "$MANAGER_CONF" ] && has_manager_conf=true
+
+    if [ $rules_count -eq 0 ] && [ "$has_manager_conf" = false ]; then
+        echo -e "${RED}没有可导出的配置数据${NC}"
         echo ""
+        read -p "按回车键返回..."
+        return 1
+    fi
+
+    # 显示导出内容摘要
+    echo -e "${BLUE}将要导出的完整配置：${NC}"
+    echo -e "  转发规则: ${GREEN}$rules_count 条${NC}"
+    [ "$has_manager_conf" = true ] && echo -e "  管理状态: ${GREEN}包含${NC}"
+    [ -f "$HEALTH_STATUS_FILE" ] && echo -e "  健康监控: ${GREEN}包含${NC}"
+    echo -e "  备注权重: ${GREEN}完整保留${NC}"
+    echo ""
+
+    # 确认导出
+    read -p "确认导出配置包？(y/n): " confirm
+    if ! echo "$confirm" | grep -qE "^[Yy]$"; then
+        echo -e "${BLUE}已取消导出操作${NC}"
         read -p "按回车键返回..."
         return
     fi
 
-    # JSON语法验证
-    if ! validate_json_config "$selected_file" >/dev/null 2>&1; then
-        echo -e "${RED}检查配置文件有误，建议使用脚本重新生成${NC}"
+    # 导出到/usr/local/bin目录
+    local export_dir="/usr/local/bin"
+
+    # 生成导出文件名
+    local timestamp=$(get_gmt8_time '+%Y%m%d_%H%M%S')
+    local export_filename="xwPF_config_${timestamp}.tar.gz"
+    local export_path="${export_dir}/${export_filename}"
+
+    # 创建临时目录
+    local temp_dir=$(mktemp -d)
+    local package_dir="${temp_dir}/xwPF_config"
+    mkdir -p "$package_dir"
+
+    echo ""
+    echo -e "${YELLOW}正在收集配置数据...${NC}"
+
+    # 生成元数据文件
+    generate_export_metadata "${package_dir}/metadata.txt" "$rules_count"
+
+    # 复制规则文件
+    if [ $rules_count -gt 0 ]; then
+        mkdir -p "${package_dir}/rules"
+        cp "${RULES_DIR}"/rule-*.conf "${package_dir}/rules/" 2>/dev/null
+        echo -e "${GREEN}✓${NC} 已收集 $rules_count 个规则文件"
+    fi
+
+    # 复制管理配置文件
+    if [ -f "$MANAGER_CONF" ]; then
+        cp "$MANAGER_CONF" "${package_dir}/"
+        echo -e "${GREEN}✓${NC} 已收集管理配置文件"
+    fi
+
+    # 复制健康状态文件
+    if [ -f "$HEALTH_STATUS_FILE" ]; then
+        cp "$HEALTH_STATUS_FILE" "${package_dir}/health_status.conf"
+        echo -e "${GREEN}✓${NC} 已收集健康状态文件"
+    fi
+
+    # 创建压缩包
+    echo -e "${YELLOW}正在创建压缩包...${NC}"
+    cd "$temp_dir"
+    if tar -czf "$export_path" xwPF_config/ >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ 配置包导出成功${NC}"
         echo ""
+        echo -e "${BLUE}导出信息：${NC}"
+        echo -e "  文件名: ${GREEN}$export_filename${NC}"
+        echo -e "  路径: ${GREEN}$export_path${NC}"
+        echo -e "  大小: ${GREEN}$(du -h "$export_path" 2>/dev/null | cut -f1)${NC}"
+    else
+        echo -e "${RED}✗ 配置包创建失败${NC}"
+        rm -rf "$temp_dir"
+        read -p "按回车键返回..."
+        return 1
+    fi
+
+    # 清理临时目录
+    rm -rf "$temp_dir"
+
+    echo ""
+    read -p "按回车键返回..."
+}
+
+# 导出配置包(包含查看配置)
+export_config_with_view() {
+    echo -e "${YELLOW}=== 查看配置文件 ===${NC}"
+    echo -e "${BLUE}当前生效配置文件:${NC}"
+    echo -e "${YELLOW}文件: $CONFIG_PATH${NC}"
+    echo ""
+
+    if [ -f "$CONFIG_PATH" ]; then
+        cat "$CONFIG_PATH" | sed 's/^/  /'
+    else
+        echo -e "${RED}配置文件不存在${NC}"
+    fi
+
+    echo ""
+    echo "是否一键导出当前全部文件架构？"
+    echo -e "${GREEN}1.${NC}  一键导出为压缩包 "
+    echo -e "${GREEN}2.${NC} 返回菜单"
+    echo ""
+    read -p "请输入选择 [1-2]: " export_choice
+    echo ""
+
+    case $export_choice in
+        1)
+            export_config_package
+            ;;
+        2)
+            ;;
+        *)
+            echo -e "${RED}无效选择${NC}"
+            read -p "按回车键继续..."
+            ;;
+    esac
+}
+
+# 验证配置包内容结构
+validate_config_package_content() {
+    local package_file="$1"
+    local temp_dir=$(mktemp -d)
+
+    # 解压到临时目录
+    if ! tar -xzf "$package_file" -C "$temp_dir" >/dev/null 2>&1; then
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    # 查找包含metadata.txt的目录（不依赖包名）
+    local config_dir=""
+    for dir in "$temp_dir"/*; do
+        if [ -d "$dir" ] && [ -f "$dir/metadata.txt" ]; then
+            config_dir="$dir"
+            break
+        fi
+    done
+
+    if [ -z "$config_dir" ]; then
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    # 输出配置目录路径供后续使用
+    echo "$config_dir"
+    return 0
+}
+
+
+
+# 导入配置包
+import_config_package() {
+    echo -e "${YELLOW}=== 导入配置包 ===${NC}"
+    echo ""
+
+    # 直接让用户输入配置包路径
+    echo -e "${BLUE}请输入配置包的完整路径：${NC}"
+    read -p "路径: " package_path
+    echo ""
+
+    if [ -z "$package_path" ]; then
+        echo -e "${BLUE}已取消操作${NC}"
         read -p "按回车键返回..."
         return
     fi
 
-    echo -e "${GREEN}✓ 配置文件格式检查通过${NC}"
-    echo ""
-
-    # 提取endpoints信息进行预览
-    echo -e "${BLUE}正在分析配置内容...${NC}"
-    local endpoints_info=""
-
-    local python_cmd=""
-    if command -v python3 >/dev/null 2>&1; then
-        python_cmd="python3"
-    elif command -v python >/dev/null 2>&1; then
-        python_cmd="python"
-    fi
-
-    if [ -n "$python_cmd" ]; then
-        endpoints_info=$($python_cmd -c "
-import json
-import sys
-
-try:
-    with open('$selected_file', 'r') as f:
-        data = json.load(f)
-
-    if 'endpoints' in data:
-        for endpoint in data['endpoints']:
-            listen = endpoint.get('listen', '')
-            remote = endpoint.get('remote', '')
-            extra_remotes = endpoint.get('extra_remotes', [])
-            balance = endpoint.get('balance', '')
-
-            if listen and remote:
-                # 构建完整的目标列表
-                targets = [remote]
-                if extra_remotes:
-                    targets.extend(extra_remotes)
-
-                # 构建负载均衡信息
-                balance_info = ''
-                if balance:
-                    import re
-                    if 'roundrobin' in balance:
-                        balance_info = ' [轮询]'
-                        # 提取并显示权重信息
-                        weight_match = re.search(r'roundrobin:\s*([0-9,\s]+)', balance)
-                        if weight_match and extra_remotes:
-                            weights = weight_match.group(1).replace(' ', '')
-                            balance_info += '[权重: ' + weights + ']'
-                        elif extra_remotes:
-                            balance_info += '[默认权重]'
-                    elif 'iphash' in balance:
-                        balance_info = ' [IP哈希]'
-                        # 提取并显示权重信息
-                        weight_match = re.search(r'iphash:\s*([0-9,\s]+)', balance)
-                        if weight_match and extra_remotes:
-                            weights = weight_match.group(1).replace(' ', '')
-                            balance_info += '[权重: ' + weights + ']'
-                elif extra_remotes:
-                    balance_info = ' [轮询][默认权重]'
-
-                # 显示格式：先显示负载均衡信息，然后逐行显示每个服务器
-                print('发现端点配置:' + balance_info)
-                for i, target in enumerate(targets):
-                    print('  {0} -> {1}'.format(listen, target))
-
-                print('')  # 空行分隔
-except Exception as e:
-    sys.exit(1)
-")
-    else
-        endpoints_info=$(grep -A 30 '"endpoints"' "$selected_file" | awk '
-            /"listen":/ {
-                gsub(/[",]/, "", $2);
-                listen = $2
-            }
-            /"remote":/ {
-                gsub(/[",]/, "", $2);
-                remote = $2
-            }
-            /"through":/ {
-                gsub(/[",]/, "", $2);
-                through = $2
-            }
-            /"extra_remotes":/ {
-                has_extra = 1
-                # 尝试计算extra_remotes数量
-                extra_count = 0
-                getline
-                while ($0 ~ /["\[]/ && $0 !~ /[\]]/) {
-                    if ($0 ~ /"[^"]*"/) extra_count++
-                    getline
-                }
-                if ($0 ~ /"[^"]*"/) extra_count++
-            }
-            /"balance":/ {
-                gsub(/[",]/, "", $2);
-                balance = $2
-            }
-            /^\s*}/ && listen && remote {
-                # 构建负载均衡信息
-                balance_info = ""
-                if (balance ~ /roundrobin/) {
-                    balance_info = " [轮询]"
-                    if (balance ~ /:/) {
-                        split(balance, parts, ":")
-                        if (length(parts) > 1) {
-                            gsub(/^\s+|\s+$/, "", parts[2])
-                            balance_info = balance_info "[权重" parts[2] "]"
-                        }
-                    }
-                } else if (balance ~ /iphash/) {
-                    balance_info = " [IP哈希]"
-                } else if (has_extra) {
-                    balance_info = " [轮询]"
-                }
-
-                print "发现端点配置:" balance_info
-                print "  " listen " -> " remote
-                if (has_extra && extra_count > 0) {
-                    for (i = 1; i <= extra_count; i++) {
-                        print "  " listen " -> (备用服务器" i ")"
-                    }
-                }
-                print ""
-                listen = ""; remote = ""; has_extra = 0; balance = ""; extra_count = 0
-            }
-        ')
-    fi
-
-    if [ -z "$endpoints_info" ]; then
-        echo -e "${RED}检查配置文件有误，建议使用脚本重新生成${NC}"
-        echo ""
+    if [ ! -f "$package_path" ]; then
+        echo -e "${RED}文件不存在: $package_path${NC}"
         read -p "按回车键返回..."
         return
     fi
 
-    # 计算实际的端点数量（以"发现端点配置:"开头的行）
-    local endpoint_count=$(echo "$endpoints_info" | grep -c "发现端点配置:")
-    if [ "$endpoint_count" -eq 0 ]; then
-        # 如果没有找到新格式，使用旧的计算方式
-        endpoint_count=$(echo "$endpoints_info" | grep -c " -> ")
-        echo -e "${GREEN}发现 $endpoint_count 个端点配置:${NC}"
-        echo "$endpoints_info" | sed 's/^/  /'
-    else
-        echo -e "${GREEN}配置预览:${NC}"
-        echo "$endpoints_info"
+    # 验证并获取配置目录
+    echo -e "${YELLOW}正在验证配置包...${NC}"
+    local config_dir=$(validate_config_package_content "$package_path")
+    if [ $? -ne 0 ] || [ -z "$config_dir" ]; then
+        echo -e "${RED}无效的配置包文件${NC}"
+        read -p "按回车键返回..."
+        return
     fi
-    echo ""
 
-    # 显示当前规则数量
+    local selected_filename=$(basename "$package_path")
+
+    echo -e "${BLUE}配置包: ${GREEN}$selected_filename${NC}"
+
+    # 显示导入预览
+    if [ -f "${config_dir}/metadata.txt" ]; then
+        source "${config_dir}/metadata.txt"
+        echo -e "${BLUE}配置包信息：${NC}"
+        echo -e "  导出时间: ${GREEN}$EXPORT_TIME${NC}"
+        echo -e "  脚本版本: ${GREEN}$SCRIPT_VERSION${NC}"
+        echo -e "  规则数量: ${GREEN}$RULES_COUNT${NC}"
+        echo ""
+    fi
+
+    # 统计当前配置
     local current_rules=0
     if [ -d "$RULES_DIR" ]; then
         current_rules=$(find "$RULES_DIR" -name "rule-*.conf" -type f 2>/dev/null | wc -l)
     fi
 
     echo -e "${YELLOW}当前规则数量: $current_rules${NC}"
-    echo -e "${YELLOW}即将导入规则: $endpoint_count${NC}"
+    echo -e "${YELLOW}即将导入规则: $RULES_COUNT${NC}"
     echo ""
     echo -e "${RED}警告: 导入操作将覆盖所有现有配置！${NC}"
     echo ""
 
     # 确认导入
-    read -p "确认导入配置文件？(y/n): " confirm
+    read -p "确认导入配置包？(y/n): " confirm
     if ! echo "$confirm" | grep -qE "^[Yy]$"; then
         echo -e "${BLUE}已取消导入操作${NC}"
+        rm -rf "$(dirname "$config_dir")"
         read -p "按回车键返回..."
         return
     fi
@@ -1981,8 +1533,49 @@ except Exception as e:
     echo ""
     echo -e "${YELLOW}正在导入配置...${NC}"
 
-    if import_json_to_rules "$selected_file"; then
-        echo -e "${GREEN}✓ 配置导入成功${NC}"
+    # 清理现有配置
+    echo -e "${BLUE}正在清理现有配置...${NC}"
+    if [ -d "$RULES_DIR" ]; then
+        rm -f "${RULES_DIR}"/rule-*.conf 2>/dev/null
+    fi
+    rm -f "$MANAGER_CONF" 2>/dev/null
+    rm -f "$HEALTH_STATUS_FILE" 2>/dev/null
+
+    # 初始化目录
+    init_rules_dir
+
+    # 恢复配置数据
+    local imported_count=0
+
+    # 恢复规则文件
+    if [ -d "${config_dir}/rules" ]; then
+        for rule_file in "${config_dir}/rules"/rule-*.conf; do
+            if [ -f "$rule_file" ]; then
+                local rule_name=$(basename "$rule_file")
+                cp "$rule_file" "${RULES_DIR}/"
+                imported_count=$((imported_count + 1))
+                echo -e "${GREEN}✓${NC} 恢复规则文件: $rule_name"
+            fi
+        done
+    fi
+
+    # 恢复管理配置文件
+    if [ -f "${config_dir}/manager.conf" ]; then
+        cp "${config_dir}/manager.conf" "$MANAGER_CONF"
+        echo -e "${GREEN}✓${NC} 恢复管理配置文件"
+    fi
+
+    # 恢复健康状态文件
+    if [ -f "${config_dir}/health_status.conf" ]; then
+        cp "${config_dir}/health_status.conf" "$HEALTH_STATUS_FILE"
+        echo -e "${GREEN}✓${NC} 恢复健康状态文件"
+    fi
+
+    # 清理临时目录
+    rm -rf "$(dirname "$config_dir")"
+
+    if [ $imported_count -gt 0 ]; then
+        echo -e "${GREEN}✓ 配置导入成功，共恢复 $imported_count 个规则${NC}"
         echo ""
         echo -e "${YELLOW}正在重启服务以应用新配置...${NC}"
         service_restart
@@ -1992,6 +1585,28 @@ except Exception as e:
         echo -e "${RED}✗ 配置导入失败${NC}"
     fi
 
+    echo ""
+    read -p "按回车键返回..."
+}
+
+# 兼容旧JSON格式的导入功能（保留作为备用）
+import_legacy_json_config() {
+    echo -e "${YELLOW}=== 导入传统JSON配置 ===${NC}"
+    echo ""
+    echo -e "${BLUE}此功能用于导入非脚本生成的JSON配置文件${NC}"
+    echo -e "${YELLOW}建议优先使用配置包导入功能${NC}"
+    echo ""
+
+    read -p "确认继续使用传统导入？(y/n): " confirm
+    if ! echo "$confirm" | grep -qE "^[Yy]$"; then
+        echo -e "${BLUE}已取消操作${NC}"
+        read -p "按回车键返回..."
+        return
+    fi
+
+    echo ""
+    echo -e "${RED}传统JSON导入功能已移除，请使用配置包导入${NC}"
+    echo -e "${YELLOW}如需导入外部JSON配置，请联系脚本作者${NC}"
     echo ""
     read -p "按回车键返回..."
 }
@@ -2060,7 +1675,23 @@ rules_management_menu() {
                             if [ -n "$RULE_NOTE" ]; then
                                 note_display=" | 备注: $RULE_NOTE"
                             fi
-                            echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
+                            # 添加MPTCP状态显示
+                            local mptcp_mode="${MPTCP_MODE:-off}"
+                            local mptcp_display=""
+                            if [ "$mptcp_mode" != "off" ]; then
+                                local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+                                local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+                                mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+                            fi
+                            # 添加Proxy状态显示
+                            local proxy_mode="${PROXY_MODE:-off}"
+                            local proxy_display=""
+                            if [ "$proxy_mode" != "off" ]; then
+                                local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+                                local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+                                proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+                            fi
+                            echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
 
                         fi
                     fi
@@ -2096,7 +1727,23 @@ rules_management_menu() {
                             if [ -n "$RULE_NOTE" ]; then
                                 note_display=" | 备注: $RULE_NOTE"
                             fi
-                            echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
+                            # 添加MPTCP状态显示
+                            local mptcp_mode="${MPTCP_MODE:-off}"
+                            local mptcp_display=""
+                            if [ "$mptcp_mode" != "off" ]; then
+                                local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+                                local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+                                mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+                            fi
+                            # 添加Proxy状态显示
+                            local proxy_mode="${PROXY_MODE:-off}"
+                            local proxy_display=""
+                            if [ "$proxy_mode" != "off" ]; then
+                                local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+                                local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+                                proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+                            fi
+                            echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
 
                         fi
                     fi
@@ -2132,27 +1779,29 @@ rules_management_menu() {
         echo ""
 
         echo "请选择操作:"
-        echo -e "${GREEN}1.${NC} 查看/导入配置文件"
+        echo -e "${GREEN}1.${NC} 配置文件管理"
         echo -e "${GREEN}2.${NC} 添加新配置"
         echo -e "${GREEN}3.${NC} 删除配置"
         echo -e "${GREEN}4.${NC} 启用/禁用中转规则"
         echo -e "${BLUE}5.${NC} 负载均衡管理"
-        echo -e "${GREEN}6.${NC} 返回主菜单"
+        echo -e "${YELLOW}6.${NC} 开启/关闭 MPTCP"
+        echo -e "${CYAN}7.${NC} 开启/关闭 Proxy Protocol"
+        echo -e "${GREEN}8.${NC} 返回主菜单"
         echo ""
 
-        read -p "请输入选择 [1-6]: " choice
+        read -p "请输入选择 [1-8]: " choice
         echo ""
 
         case $choice in
             1)
-                # 查看/导入配置文件子菜单
+                # 配置文件管理子菜单
                 while true; do
                     clear
-                    echo -e "${GREEN}=== 查看/导入配置文件 ===${NC}"
+                    echo -e "${GREEN}=== 配置文件管理 ===${NC}"
                     echo ""
                     echo "请选择操作:"
-                    echo -e "${GREEN}1.${NC} 查看配置文件"
-                    echo -e "${GREEN}2.${NC} 导入配置文件"
+                    echo -e "${GREEN}1.${NC} 导出配置包(包含查看配置)"
+                    echo -e "${GREEN}2.${NC} 导入配置包"
                     echo -e "${GREEN}3.${NC} 返回上级菜单"
                     echo ""
                     read -p "请输入选择 [1-3]: " sub_choice
@@ -2160,20 +1809,10 @@ rules_management_menu() {
 
                     case $sub_choice in
                         1)
-                            echo -e "${YELLOW}=== 查看配置文件 ===${NC}"
-                            echo -e "${BLUE}当前生效配置文件:${NC}"
-                            echo -e "${YELLOW}文件: $CONFIG_PATH${NC}"
-                            echo ""
-                            if [ -f "$CONFIG_PATH" ]; then
-                                cat "$CONFIG_PATH" | sed 's/^/  /'
-                            else
-                                echo -e "${RED}配置文件不存在${NC}"
-                            fi
-                            echo ""
-                            read -p "按回车键继续..."
+                            export_config_with_view
                             ;;
                         2)
-                            import_config_file
+                            import_config_package
                             ;;
                         3)
                             break
@@ -2249,15 +1888,964 @@ rules_management_menu() {
                 load_balance_management_menu
                 ;;
             6)
+                # MPTCP管理
+                mptcp_management_menu
+                ;;
+            7)
+                # Proxy管理
+                proxy_management_menu
+                ;;
+            8)
                 break
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-6${NC}"
+                echo -e "${RED}无效选择，请输入 1-8${NC}"
                 read -p "按回车键继续..."
                 ;;
         esac
     done
 }
+
+#--- MPTCP管理功能 ---
+
+# 检查MPTCP系统支持
+check_mptcp_support() {
+    # 检查内核版本
+    local kernel_version=$(uname -r | cut -d. -f1,2)
+    local major=$(echo $kernel_version | cut -d. -f1)
+    local minor=$(echo $kernel_version | cut -d. -f2)
+
+    if [ "$major" -lt 5 ] || ([ "$major" -eq 5 ] && [ "$minor" -le 6 ]); then
+        return 1
+    fi
+
+    # 检查MPTCP是否启用
+    if [ -f "/proc/sys/net/mptcp/enabled" ]; then
+        local enabled=$(cat /proc/sys/net/mptcp/enabled 2>/dev/null)
+        [ "$enabled" = "1" ]
+    else
+        return 1
+    fi
+}
+
+# 尝试启用MPTCP（配置生效）
+enable_mptcp() {
+    echo -e "${BLUE}正在尝试保存配置启用MPTCP...${NC}"
+
+    # 创建sysctl配置文件启用MPTCP
+    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
+
+    if echo "net.mptcp.enabled=1" > "$mptcp_conf" 2>/dev/null; then
+        echo -e "${GREEN}✓ MPTCP配置文件已创建: $mptcp_conf${NC}"
+
+        # 立即应用配置
+        if sysctl -p "$mptcp_conf" >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ MPTCP已成功启用并保存生效${NC}"
+            echo -e "${BLUE}配置将在重启后自动加载${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}配置文件已创建，但立即应用失败${NC}"
+            echo -e "${YELLOW}请手动执行: sysctl -p $mptcp_conf${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}错误: 无法创建MPTCP配置文件${NC}"
+        echo -e "${YELLOW}请手动执行以下命令：${NC}"
+        echo -e "${BLUE}echo 'net.mptcp.enabled=1' > $mptcp_conf${NC}"
+        echo -e "${BLUE}sysctl -p $mptcp_conf${NC}"
+        return 1
+    fi
+}
+
+# 禁用MPTCP（配置生效）
+disable_mptcp() {
+    echo -e "${BLUE}正在禁用MPTCP...${NC}"
+
+    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
+
+    # 立即禁用MPTCP
+    if echo 0 > /proc/sys/net/mptcp/enabled 2>/dev/null; then
+        echo -e "${GREEN}✓ MPTCP已立即禁用${NC}"
+    else
+        echo -e "${YELLOW}立即禁用MPTCP失败，但将删除配置文件${NC}"
+    fi
+
+    # 删除配置文件以防止重启后自动启用
+    if [ -f "$mptcp_conf" ]; then
+        if rm -f "$mptcp_conf" 2>/dev/null; then
+            echo -e "${GREEN}✓ MPTCP配置文件已删除${NC}"
+            echo -e "${BLUE}重启后MPTCP将保持禁用状态${NC}"
+        else
+            echo -e "${YELLOW}无法删除配置文件: $mptcp_conf${NC}"
+            echo -e "${YELLOW}请手动删除以防止重启后自动启用${NC}"
+        fi
+    fi
+
+    return 0
+}
+
+# 获取MPTCP模式显示文本
+get_mptcp_mode_display() {
+    local mode="$1"
+    case "$mode" in
+        "off")
+            echo "关闭"
+            ;;
+        "send")
+            echo "发送"
+            ;;
+        "accept")
+            echo "接收"
+            ;;
+        "both")
+            echo "双向"
+            ;;
+        *)
+            echo "关闭"
+            ;;
+    esac
+}
+
+# 获取MPTCP模式颜色
+get_mptcp_mode_color() {
+    local mode="$1"
+    case "$mode" in
+        "off")
+            echo "${WHITE}"
+            ;;
+        "send")
+            echo "${BLUE}"
+            ;;
+        "accept")
+            echo "${YELLOW}"
+            ;;
+        "both")
+            echo "${GREEN}"
+            ;;
+        *)
+            echo "${WHITE}"
+            ;;
+    esac
+}
+
+# MPTCP管理主菜单
+mptcp_management_menu() {
+    # 初始化MPTCP字段（确保向后兼容）
+    init_mptcp_fields
+
+    while true; do
+        clear
+        echo -e "${GREEN}=== MPTCP 管理 ===${NC}"
+        echo ""
+
+        # 首先检查系统支持
+        if ! check_mptcp_support; then
+            local kernel_version=$(uname -r)
+            local kernel_major=$(echo $kernel_version | cut -d. -f1)
+            local kernel_minor=$(echo $kernel_version | cut -d. -f2)
+
+            echo -e "${RED}系统不支持MPTCP或未启用${NC}"
+            echo ""
+            echo -e "${YELLOW}MPTCP要求：${NC}"
+            echo -e "  • Linux内核版本 > 5.6"
+            echo -e "  • net.mptcp.enabled=1"
+            echo ""
+
+            echo -e "${BLUE}当前内核版本: ${GREEN}$kernel_version${NC}"
+
+            # 检查内核版本支持情况
+            if [ "$kernel_major" -lt 5 ] || ([ "$kernel_major" -eq 5 ] && [ "$kernel_minor" -le 6 ]); then
+                echo -e "${RED}✗ 内核版本不支持MPTCP${NC}(需要 > 5.6)"
+            else
+                echo -e "${GREEN}✓ 内核版本支持MPTCP${NC}"
+            fi
+
+            # 检查MPTCP启用状态
+            if [ -f "/proc/sys/net/mptcp/enabled" ]; then
+                local enabled=$(cat /proc/sys/net/mptcp/enabled 2>/dev/null)
+                if [ "$enabled" = "1" ]; then
+                    echo -e "${GREEN}✓ MPTCP已启用${NC}(net.mptcp.enabled=$enabled)"
+                else
+                    echo -e "${RED}✗ MPTCP未启用${NC}(net.mptcp.enabled=$enabled，需要为1)"
+                fi
+            else
+                echo -e "${RED}✗ 系统不支持MPTCP${NC}(/proc/sys/net/mptcp/enabled 不存在)"
+            fi
+
+            echo ""
+            read -p "是否尝试启用MPTCP? [y/N]: " enable_choice
+            if [[ "$enable_choice" =~ ^[Yy]$ ]]; then
+                enable_mptcp
+            fi
+            echo ""
+            read -p "按回车键返回..."
+            return
+        fi
+
+        # 显示详细的系统MPTCP状态
+        local current_status=$(cat /proc/sys/net/mptcp/enabled 2>/dev/null)
+        local config_file="/etc/sysctl.d/90-enable-MPTCP.conf"
+
+        echo -e "${GREEN}✓ 系统支持MPTCP${NC}(net.mptcp.enabled=$current_status)"
+
+        if [ "$current_status" = "1" ]; then
+            if [ -f "$config_file" ]; then
+                echo -e "${GREEN}✓ 系统已开启MPTCP${NC}(MPTCP配置已设置)"
+            else
+                echo -e "${YELLOW}⚠ 系统已开启MPTCP${NC}(临时开启，重启后可能失效)"
+                echo ""
+                read -p "是否保存为配置文件重启依旧生效？[y/N]: " save_config
+                if [[ "$save_config" =~ ^[Yy]$ ]]; then
+                    if echo "net.mptcp.enabled=1" > "$config_file" 2>/dev/null; then
+                        echo -e "${GREEN}✓ MPTCP配置已保存: $config_file${NC}"
+
+                        # 立即应用配置
+                        if sysctl -p "$config_file" >/dev/null 2>&1; then
+                            echo -e "${GREEN}✓ 配置已立即生效，重启后自动加载${NC}"
+                        else
+                            echo -e "${YELLOW}配置文件已保存，但立即应用失败${NC}"
+                            echo -e "${BLUE}手动应用配置: sysctl -p $config_file${NC}"
+                        fi
+                    else
+                        echo -e "${RED}✗ 保存MPTCP配置失败${NC}"
+                        echo -e "${YELLOW}请手动执行: echo 'net.mptcp.enabled=1' > $config_file${NC}"
+                    fi
+                fi
+            fi
+        else
+            echo -e "${RED}✗ 系统未开启MPTCP${NC}(当前为普通TCP模式)"
+        fi
+        echo ""
+
+        # 显示规则列表和MPTCP状态
+        if ! list_rules_for_mptcp_management; then
+            echo ""
+            read -p "按回车键返回..."
+            return
+        fi
+
+        echo ""
+        echo -e "${RED}规则ID 0: 关闭系统MPTCP，回退普通TCP模式${NC}"
+        echo ""
+
+        read -p "请输入要配置的规则ID(多ID使用逗号,分隔，0为关闭系统MPTCP): " rule_input
+        if [ -z "$rule_input" ]; then
+            return
+        fi
+
+        # 规则ID 0的特殊处理：直接关闭系统MPTCP
+        if [ "$rule_input" = "0" ]; then
+            echo ""
+            echo -e "${YELLOW}确认关闭系统MPTCP？这将影响所有MPTCP连接。${NC}"
+            read -p "继续? [y/N]: " confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                set_mptcp_mode "0" ""
+            fi
+            read -p "按回车键继续..."
+            continue
+        fi
+
+        # 显示MPTCP模式选择
+        echo ""
+        echo -e "${BLUE}请选择新的 MPTCP 模式:${NC}"
+        echo -e "${WHITE}1.${NC} off (关闭)"
+        echo -e "${BLUE}2.${NC} 仅发送"
+        echo -e "${YELLOW}3.${NC} 仅接收"
+        echo -e "${GREEN}4.${NC} 双向(发送+接收)"
+        echo ""
+
+        read -p "请选择MPTCP模式 [1-4]: " mode_choice
+        if [ -z "$mode_choice" ]; then
+            continue
+        fi
+
+        # 判断是单个ID还是多个ID
+        if [[ "$rule_input" == *","* ]]; then
+            # 多个ID，使用批量设置
+            batch_set_mptcp_mode "$rule_input" "$mode_choice"
+        else
+            # 单个ID，直接设置
+            if [[ "$rule_input" =~ ^[0-9]+$ ]]; then
+                set_mptcp_mode "$rule_input" "$mode_choice"
+            else
+                echo -e "${RED}无效的规则ID${NC}"
+            fi
+        fi
+        read -p "按回车键继续..."
+    done
+}
+
+# 列出规则用于MPTCP管理
+list_rules_for_mptcp_management() {
+    if [ ! -d "$RULES_DIR" ] || [ -z "$(ls -A "$RULES_DIR"/*.conf 2>/dev/null)" ]; then
+        echo -e "${BLUE}暂无转发规则${NC}"
+        return 1
+    fi
+
+    echo -e "${BLUE}当前规则列表:${NC}"
+    echo ""
+
+    local has_rules=false
+    for rule_file in "${RULES_DIR}"/rule-*.conf; do
+        if [ -f "$rule_file" ]; then
+            if read_rule_file "$rule_file"; then
+                has_rules=true
+
+                local status_color="${GREEN}"
+                local status_text="启用"
+                if [ "$ENABLED" != "true" ]; then
+                    status_color="${RED}"
+                    status_text="禁用"
+                fi
+
+                # 获取MPTCP模式
+                local mptcp_mode="${MPTCP_MODE:-off}"
+                local mptcp_display=$(get_mptcp_mode_display "$mptcp_mode")
+                local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+
+                echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME | 状态: ${status_color}$status_text${NC} | MPTCP: ${mptcp_color}$mptcp_display${NC}"
+
+                # 显示转发信息
+                if [ "$RULE_ROLE" = "2" ]; then
+                    # 落地服务器使用FORWARD_TARGET
+                    local target_host="${FORWARD_TARGET%:*}"
+                    local target_port="${FORWARD_TARGET##*:}"
+                    local display_target=$(smart_display_target "$target_host")
+                    local display_ip=$(get_exit_server_listen_ip)
+                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
+                else
+                    # 中转服务器使用REMOTE_HOST
+                    local display_target=$(smart_display_target "$REMOTE_HOST")
+                    local display_ip=$(get_nat_server_listen_ip)
+                    local through_display="${THROUGH_IP:-::}"
+                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
+                fi
+                echo ""
+            fi
+        fi
+    done
+
+    if [ "$has_rules" = false ]; then
+        echo -e "${BLUE}暂无有效规则${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
+# 批量设置MPTCP模式
+batch_set_mptcp_mode() {
+    local rule_ids="$1"
+    local mode_choice="$2"
+    local ids_array
+    local valid_ids=()
+    local invalid_ids=()
+
+    # 解析逗号分隔的ID
+    IFS=',' read -ra ids_array <<< "$rule_ids"
+
+    # 验证所有ID的有效性
+    for id in "${ids_array[@]}"; do
+        # 去除空格
+        id=$(echo "$id" | tr -d ' ')
+        if [[ "$id" =~ ^[0-9]+$ ]]; then
+            local rule_file="${RULES_DIR}/rule-${id}.conf"
+            if [ -f "$rule_file" ]; then
+                valid_ids+=("$id")
+            else
+                invalid_ids+=("$id")
+            fi
+        else
+            invalid_ids+=("$id")
+        fi
+    done
+
+    # 检查是否有无效ID
+    if [ ${#invalid_ids[@]} -gt 0 ]; then
+        echo -e "${RED}错误: 以下规则ID无效或不存在: ${invalid_ids[*]}${NC}"
+        return 1
+    fi
+
+    # 检查是否有有效ID
+    if [ ${#valid_ids[@]} -eq 0 ]; then
+        echo -e "${RED}错误: 没有找到有效的规则ID${NC}"
+        return 1
+    fi
+
+    # 显示所有要设置的规则信息
+    echo -e "${YELLOW}即将为以下规则设置MPTCP模式:${NC}"
+    echo ""
+    for id in "${valid_ids[@]}"; do
+        local rule_file="${RULES_DIR}/rule-${id}.conf"
+        if read_rule_file "$rule_file"; then
+            echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC} | ${BLUE}规则名称: ${GREEN}$RULE_NAME${NC}"
+        fi
+    done
+    echo ""
+
+    # 批量确认设置
+    read -p "确认为以上 ${#valid_ids[@]} 个规则设置MPTCP模式？(y/n): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        local success_count=0
+        # 循环设置每个规则
+        for id in "${valid_ids[@]}"; do
+            if set_mptcp_mode "$id" "$mode_choice" "batch"; then
+                success_count=$((success_count + 1))
+            fi
+        done
+
+        if [ $success_count -gt 0 ]; then
+            echo -e "${GREEN}✓ 成功设置 $success_count 个规则的MPTCP模式${NC}"
+            # 重启服务以应用更改
+            echo -e "${YELLOW}正在重启服务以应用配置更改...${NC}"
+            if service_restart; then
+                echo -e "${GREEN}✓ 服务重启成功，MPTCP配置已生效${NC}"
+            else
+                echo -e "${RED}✗ 服务重启失败，请检查配置${NC}"
+            fi
+            return 0
+        else
+            echo -e "${RED}✗ 没有成功设置任何规则${NC}"
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}操作已取消${NC}"
+        return 1
+    fi
+}
+
+# 设置规则的MPTCP模式
+set_mptcp_mode() {
+    local rule_id="$1"
+    local mode_choice="$2"
+    local batch_mode="$3"  # 批量模式标志
+
+    # 特殊处理规则ID 0：关闭系统MPTCP
+    if [ "$rule_id" = "0" ]; then
+        echo -e "${YELLOW}正在关闭系统MPTCP...${NC}"
+        disable_mptcp
+        echo -e "${GREEN}✓ 系统MPTCP已关闭，所有连接将使用普通TCP模式${NC}"
+        return 0
+    fi
+
+    # 验证规则ID
+    local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
+    if [ ! -f "$rule_file" ]; then
+        echo -e "${RED}错误: 规则 $rule_id 不存在${NC}"
+        return 1
+    fi
+
+    # 读取规则信息
+    if ! read_rule_file "$rule_file"; then
+        echo -e "${RED}错误: 读取规则文件失败${NC}"
+        return 1
+    fi
+
+    # 转换模式选择为模式值
+    local new_mode
+    case "$mode_choice" in
+        "1")
+            new_mode="off"
+            ;;
+        "2")
+            new_mode="send"
+            ;;
+        "3")
+            new_mode="accept"
+            ;;
+        "4")
+            new_mode="both"
+            ;;
+        *)
+            echo -e "${RED}无效的模式选择${NC}"
+            return 1
+            ;;
+    esac
+
+    local mode_display=$(get_mptcp_mode_display "$new_mode")
+    local mode_color=$(get_mptcp_mode_color "$new_mode")
+
+    if [ "$batch_mode" != "batch" ]; then
+        echo -e "${YELLOW}正在为规则 '$RULE_NAME' 设置MPTCP模式为: ${mode_color}$mode_display${NC}"
+    fi
+
+    # 更新规则文件中的MPTCP_MODE字段
+    local temp_file="${rule_file}.tmp.$$"
+
+    if grep -q "^MPTCP_MODE=" "$rule_file"; then
+        # 更新现有的MPTCP_MODE字段
+        grep -v "^MPTCP_MODE=" "$rule_file" > "$temp_file"
+        echo "MPTCP_MODE=\"$new_mode\"" >> "$temp_file"
+        mv "$temp_file" "$rule_file"
+    else
+        # 添加新的MPTCP_MODE字段
+        echo "MPTCP_MODE=\"$new_mode\"" >> "$rule_file"
+    fi
+
+    if [ $? -eq 0 ]; then
+        if [ "$batch_mode" != "batch" ]; then
+            echo -e "${GREEN}✓ MPTCP模式已更新为: ${mode_color}$mode_display${NC}"
+
+            # 重启服务以应用更改
+            echo -e "${YELLOW}正在重启服务以应用MPTCP配置...${NC}"
+            if service_restart; then
+                echo -e "${GREEN}✓ 服务重启成功，MPTCP配置已生效${NC}"
+            else
+                echo -e "${RED}✗ 服务重启失败，请检查配置${NC}"
+            fi
+        fi
+        return 0
+    else
+        if [ "$batch_mode" != "batch" ]; then
+            echo -e "${RED}✗ 更新MPTCP模式失败${NC}"
+        fi
+        return 1
+    fi
+}
+
+
+
+# 初始化所有规则文件的MPTCP字段（确保向后兼容）
+init_mptcp_fields() {
+    if [ ! -d "$RULES_DIR" ]; then
+        return 0
+    fi
+
+    for rule_file in "${RULES_DIR}"/rule-*.conf; do
+        if [ -f "$rule_file" ]; then
+            # 检查是否已有MPTCP_MODE字段
+            if ! grep -q "^MPTCP_MODE=" "$rule_file"; then
+                echo "MPTCP_MODE=\"off\"" >> "$rule_file"
+            fi
+        fi
+    done
+}
+
+
+
+#--- Proxy管理功能 ---
+
+# 获取Proxy模式显示文本
+get_proxy_mode_display() {
+    local mode="$1"
+    case "$mode" in
+        "off")
+            echo "关闭"
+            ;;
+        "v1_send")
+            echo "v1发送"
+            ;;
+        "v1_accept")
+            echo "v1接收"
+            ;;
+        "v1_both")
+            echo "v1双向"
+            ;;
+        "v2_send")
+            echo "v2发送"
+            ;;
+        "v2_accept")
+            echo "v2接收"
+            ;;
+        "v2_both")
+            echo "v2双向"
+            ;;
+        *)
+            echo "关闭"
+            ;;
+    esac
+}
+
+# 获取Proxy模式颜色
+get_proxy_mode_color() {
+    local mode="$1"
+    case "$mode" in
+        "off")
+            echo "${WHITE}"
+            ;;
+        "v1_send"|"v2_send")
+            echo "${BLUE}"
+            ;;
+        "v1_accept"|"v2_accept")
+            echo "${YELLOW}"
+            ;;
+        "v1_both"|"v2_both")
+            echo "${GREEN}"
+            ;;
+        *)
+            echo "${WHITE}"
+            ;;
+    esac
+}
+
+# 初始化所有规则文件的Proxy字段（确保向后兼容）
+init_proxy_fields() {
+    if [ ! -d "$RULES_DIR" ]; then
+        return 0
+    fi
+
+    for rule_file in "${RULES_DIR}"/rule-*.conf; do
+        if [ -f "$rule_file" ]; then
+            # 检查是否已有PROXY_MODE字段
+            if ! grep -q "^PROXY_MODE=" "$rule_file"; then
+                echo "PROXY_MODE=\"off\"" >> "$rule_file"
+            fi
+        fi
+    done
+}
+
+# Proxy管理主菜单
+proxy_management_menu() {
+    # 初始化Proxy字段（确保向后兼容）
+    init_proxy_fields
+
+    while true; do
+        clear
+        echo -e "${GREEN}=== Proxy Protocol 管理 ===${NC}"
+        echo ""
+
+        # 显示规则列表和Proxy状态
+        if ! list_rules_for_proxy_management; then
+            echo ""
+            read -p "按回车键返回..."
+            return
+        fi
+
+        echo ""
+        read -p "请输入要配置的规则ID(多ID使用逗号,分隔): " rule_input
+        if [ -z "$rule_input" ]; then
+            return
+        fi
+
+
+
+        # 显示Proxy协议版本选择
+        echo ""
+        echo -e "${BLUE}请选择 Proxy 协议版本:${NC}"
+        echo -e "${WHITE}1.${NC} off (关闭)"
+        echo -e "${BLUE}2.${NC} 协议v1"
+        echo -e "${GREEN}3.${NC} 协议v2"
+        echo ""
+
+        read -p "请选择协议版本（回车默认v2） [1-3]: " version_choice
+        if [ -z "$version_choice" ]; then
+            version_choice="3"  # 默认选择v2
+        fi
+
+        # 如果选择关闭，直接设置
+        if [ "$version_choice" = "1" ]; then
+            # 判断是单个ID还是多个ID
+            if [[ "$rule_input" == *","* ]]; then
+                batch_set_proxy_mode "$rule_input" "off" ""
+            else
+                if [[ "$rule_input" =~ ^[0-9]+$ ]]; then
+                    set_proxy_mode "$rule_input" "off" ""
+                else
+                    echo -e "${RED}无效的规则ID${NC}"
+                fi
+            fi
+            read -p "按回车键继续..."
+            continue
+        fi
+
+        # 选择方向
+        echo ""
+        echo -e "${BLUE}请选择 Proxy 方向:${NC}"
+        echo -e "${BLUE}1.${NC} 仅发送 (send_proxy)"
+        echo -e "${YELLOW}2.${NC} 仅接收 (accept_proxy)"
+        echo -e "${GREEN}3.${NC} 双向 (send + accept)"
+        echo ""
+
+        read -p "请选择方向 [1-3]: " direction_choice
+        if [ -z "$direction_choice" ]; then
+            continue
+        fi
+
+        # 判断是单个ID还是多个ID
+        if [[ "$rule_input" == *","* ]]; then
+            # 多个ID，使用批量设置
+            batch_set_proxy_mode "$rule_input" "$version_choice" "$direction_choice"
+        else
+            # 单个ID，直接设置
+            if [[ "$rule_input" =~ ^[0-9]+$ ]]; then
+                set_proxy_mode "$rule_input" "$version_choice" "$direction_choice"
+            else
+                echo -e "${RED}无效的规则ID${NC}"
+            fi
+        fi
+        read -p "按回车键继续..."
+    done
+}
+
+# 列出规则用于Proxy管理
+list_rules_for_proxy_management() {
+    if [ ! -d "$RULES_DIR" ] || [ -z "$(ls -A "$RULES_DIR"/*.conf 2>/dev/null)" ]; then
+        echo -e "${BLUE}暂无转发规则${NC}"
+        return 1
+    fi
+
+    echo -e "${BLUE}当前规则列表:${NC}"
+    echo ""
+
+    local has_rules=false
+    for rule_file in "${RULES_DIR}"/rule-*.conf; do
+        if [ -f "$rule_file" ]; then
+            if read_rule_file "$rule_file"; then
+                has_rules=true
+
+                local status_color="${GREEN}"
+                local status_text="启用"
+                if [ "$ENABLED" != "true" ]; then
+                    status_color="${RED}"
+                    status_text="禁用"
+                fi
+
+                # 获取Proxy模式
+                local proxy_mode="${PROXY_MODE:-off}"
+                local proxy_display=$(get_proxy_mode_display "$proxy_mode")
+                local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+
+                echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME | 状态: ${status_color}$status_text${NC} | Proxy: ${proxy_color}$proxy_display${NC}"
+
+                # 显示转发信息
+                if [ "$RULE_ROLE" = "2" ]; then
+                    # 落地服务器使用FORWARD_TARGET
+                    local target_host="${FORWARD_TARGET%:*}"
+                    local target_port="${FORWARD_TARGET##*:}"
+                    local display_target=$(smart_display_target "$target_host")
+                    local display_ip=$(get_exit_server_listen_ip)
+                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
+                else
+                    # 中转服务器使用REMOTE_HOST
+                    local display_target=$(smart_display_target "$REMOTE_HOST")
+                    local display_ip=$(get_nat_server_listen_ip)
+                    local through_display="${THROUGH_IP:-::}"
+                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
+                fi
+                echo ""
+            fi
+        fi
+    done
+
+    if [ "$has_rules" = false ]; then
+        echo -e "${BLUE}暂无有效规则${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
+# 批量设置Proxy模式
+batch_set_proxy_mode() {
+    local rule_ids="$1"
+    local version_choice="$2"
+    local direction_choice="$3"
+    local ids_array
+    local valid_ids=()
+    local invalid_ids=()
+
+    # 解析逗号分隔的ID
+    IFS=',' read -ra ids_array <<< "$rule_ids"
+
+    # 验证所有ID的有效性
+    for id in "${ids_array[@]}"; do
+        # 去除空格
+        id=$(echo "$id" | tr -d ' ')
+        if [[ "$id" =~ ^[0-9]+$ ]]; then
+            local rule_file="${RULES_DIR}/rule-${id}.conf"
+            if [ -f "$rule_file" ]; then
+                valid_ids+=("$id")
+            else
+                invalid_ids+=("$id")
+            fi
+        else
+            invalid_ids+=("$id")
+        fi
+    done
+
+    # 检查是否有无效ID
+    if [ ${#invalid_ids[@]} -gt 0 ]; then
+        echo -e "${RED}错误: 以下规则ID无效或不存在: ${invalid_ids[*]}${NC}"
+        return 1
+    fi
+
+    # 检查是否有有效ID
+    if [ ${#valid_ids[@]} -eq 0 ]; then
+        echo -e "${RED}错误: 没有找到有效的规则ID${NC}"
+        return 1
+    fi
+
+    # 显示所有要设置的规则信息
+    echo -e "${YELLOW}即将为以下规则设置Proxy模式:${NC}"
+    echo ""
+    for id in "${valid_ids[@]}"; do
+        local rule_file="${RULES_DIR}/rule-${id}.conf"
+        if read_rule_file "$rule_file"; then
+            echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC} | ${BLUE}规则名称: ${GREEN}$RULE_NAME${NC}"
+        fi
+    done
+    echo ""
+
+    # 批量确认设置
+    read -p "确认为以上 ${#valid_ids[@]} 个规则设置Proxy模式？(y/n): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        local success_count=0
+        # 循环设置每个规则
+        for id in "${valid_ids[@]}"; do
+            if set_proxy_mode "$id" "$version_choice" "$direction_choice" "batch"; then
+                success_count=$((success_count + 1))
+            fi
+        done
+
+        if [ $success_count -gt 0 ]; then
+            echo -e "${GREEN}✓ 成功设置 $success_count 个规则的Proxy模式${NC}"
+            # 重启服务以应用更改
+            echo -e "${YELLOW}正在重启服务以应用配置更改...${NC}"
+            if service_restart; then
+                echo -e "${GREEN}✓ 服务重启成功，Proxy配置已生效${NC}"
+            else
+                echo -e "${RED}✗ 服务重启失败，请检查配置${NC}"
+            fi
+            return 0
+        else
+            echo -e "${RED}✗ 没有成功设置任何规则${NC}"
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}操作已取消${NC}"
+        return 1
+    fi
+}
+
+# 设置规则的Proxy模式
+set_proxy_mode() {
+    local rule_id="$1"
+    local version_choice="$2"
+    local direction_choice="$3"
+    local batch_mode="$4"  # 批量模式标志
+
+    # 验证规则ID
+    local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
+    if [ ! -f "$rule_file" ]; then
+        echo -e "${RED}错误: 规则 $rule_id 不存在${NC}"
+        return 1
+    fi
+
+    # 读取规则信息
+    if ! read_rule_file "$rule_file"; then
+        echo -e "${RED}错误: 读取规则文件失败${NC}"
+        return 1
+    fi
+
+    # 处理关闭模式
+    if [ "$version_choice" = "off" ]; then
+        local new_mode="off"
+        local mode_display=$(get_proxy_mode_display "$new_mode")
+        local mode_color=$(get_proxy_mode_color "$new_mode")
+
+        if [ "$batch_mode" != "batch" ]; then
+            echo -e "${YELLOW}正在为规则 '$RULE_NAME' 关闭Proxy功能${NC}"
+        fi
+
+        # 更新规则文件
+        update_proxy_mode_in_file "$rule_file" "$new_mode"
+
+        if [ $? -eq 0 ]; then
+            if [ "$batch_mode" != "batch" ]; then
+                echo -e "${GREEN}✓ Proxy已关闭${NC}"
+                restart_service_for_proxy
+            fi
+        fi
+        return $?
+    fi
+
+    # 转换版本和方向选择为模式值
+    local version=""
+    case "$version_choice" in
+        "2")
+            version="v1"
+            ;;
+        "3")
+            version="v2"
+            ;;
+        *)
+            echo -e "${RED}无效的版本选择${NC}"
+            return 1
+            ;;
+    esac
+
+    local direction=""
+    case "$direction_choice" in
+        "1")
+            direction="send"
+            ;;
+        "2")
+            direction="accept"
+            ;;
+        "3")
+            direction="both"
+            ;;
+        *)
+            echo -e "${RED}无效的方向选择${NC}"
+            return 1
+            ;;
+    esac
+
+    local new_mode="${version}_${direction}"
+    local mode_display=$(get_proxy_mode_display "$new_mode")
+    local mode_color=$(get_proxy_mode_color "$new_mode")
+
+    if [ "$batch_mode" != "batch" ]; then
+        echo -e "${YELLOW}正在为规则 '$RULE_NAME' 设置Proxy模式为: ${mode_color}$mode_display${NC}"
+    fi
+
+    # 更新规则文件
+    update_proxy_mode_in_file "$rule_file" "$new_mode"
+
+    if [ $? -eq 0 ]; then
+        if [ "$batch_mode" != "batch" ]; then
+            echo -e "${GREEN}✓ Proxy模式已更新为: ${mode_color}$mode_display${NC}"
+            restart_service_for_proxy
+        fi
+        return 0
+    else
+        if [ "$batch_mode" != "batch" ]; then
+            echo -e "${RED}✗ 更新Proxy模式失败${NC}"
+        fi
+        return 1
+    fi
+}
+
+# 更新规则文件中的Proxy模式
+update_proxy_mode_in_file() {
+    local rule_file="$1"
+    local new_mode="$2"
+    local temp_file="${rule_file}.tmp.$$"
+
+    if grep -q "^PROXY_MODE=" "$rule_file"; then
+        # 更新现有的PROXY_MODE字段
+        grep -v "^PROXY_MODE=" "$rule_file" > "$temp_file"
+        echo "PROXY_MODE=\"$new_mode\"" >> "$temp_file"
+        mv "$temp_file" "$rule_file"
+    else
+        # 添加新的PROXY_MODE字段
+        echo "PROXY_MODE=\"$new_mode\"" >> "$rule_file"
+    fi
+}
+
+# 重启服务以应用Proxy配置
+restart_service_for_proxy() {
+    echo -e "${YELLOW}正在重启服务以应用Proxy配置...${NC}"
+    if service_restart; then
+        echo -e "${GREEN}✓ 服务重启成功，Proxy配置已生效${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ 服务重启失败，请检查配置${NC}"
+        return 1
+    fi
+}
+
+
 
 # 负载均衡管理菜单
 load_balance_management_menu() {
@@ -3131,14 +3719,15 @@ configure_nat_server() {
     echo ""
     echo "请选择传输模式:"
     echo -e "${GREEN}[1]${NC} 默认传输 (不加密，理论最快)"
-    echo -e "${GREEN}[2]${NC} TLS (自签证书，自动生成)"
-    echo -e "${GREEN}[3]${NC} TLS (CA签发证书)"
-    echo -e "${GREEN}[4]${NC} TLS+WebSocket (自签证书，伪装HTTPS流量)"
-    echo -e "${GREEN}[5]${NC} TLS+WebSocket (CA证书，伪装HTTPS流量)"
+    echo -e "${GREEN}[2]${NC} WebSocket (ws)"
+    echo -e "${GREEN}[3]${NC} TLS (自签证书，自动生成)"
+    echo -e "${GREEN}[4]${NC} TLS (CA签发证书)"
+    echo -e "${GREEN}[5]${NC} TLS+WebSocket (自签证书)"
+    echo -e "${GREEN}[6]${NC} TLS+WebSocket (CA证书)"
     echo ""
 
     while true; do
-        read -p "请输入选择 [1-5]: " transport_choice
+        read -p "请输入选择 [1-6]: " transport_choice
         case $transport_choice in
             1)
                 SECURITY_LEVEL="standard"
@@ -3146,6 +3735,19 @@ configure_nat_server() {
                 break
                 ;;
             2)
+                SECURITY_LEVEL="ws"
+                echo -e "${GREEN}已选择: WebSocket${NC}"
+
+                # WebSocket路径配置
+                echo ""
+                read -p "请输入WebSocket路径 [默认: /ws]: " WS_PATH
+                if [ -z "$WS_PATH" ]; then
+                    WS_PATH="/ws"
+                fi
+                echo -e "${GREEN}WebSocket路径设置为: $WS_PATH${NC}"
+                break
+                ;;
+            3)
                 SECURITY_LEVEL="tls_self"
                 echo -e "${GREEN}已选择: TLS自签证书${NC}"
 
@@ -3159,7 +3761,7 @@ configure_nat_server() {
                 echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
                 break
                 ;;
-            3)
+            4)
                 SECURITY_LEVEL="tls_ca"
                 echo -e "${GREEN}已选择: TLS CA证书${NC}"
 
@@ -3187,7 +3789,7 @@ configure_nat_server() {
                 echo -e "${GREEN}TLS配置完成${NC}"
                 break
                 ;;
-            4)
+            5)
                 SECURITY_LEVEL="ws_tls_self"
                 echo -e "${GREEN}已选择: TLS+WebSocket自签证书${NC}"
 
@@ -3208,7 +3810,7 @@ configure_nat_server() {
                 echo -e "${GREEN}WebSocket路径设置为: $WS_PATH${NC}"
                 break
                 ;;
-            5)
+            6)
                 SECURITY_LEVEL="ws_tls_ca"
                 echo -e "${GREEN}已选择: TLS+WebSocket CA证书${NC}"
 
@@ -3243,7 +3845,7 @@ configure_nat_server() {
                 break
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-5${NC}"
+                echo -e "${RED}无效选择，请输入 1-6${NC}"
                 ;;
         esac
     done
@@ -3418,14 +4020,15 @@ configure_exit_server() {
     echo ""
     echo "请选择传输模式:"
     echo -e "${GREEN}[1]${NC} 默认传输 (不加密，理论最快)"
-    echo -e "${GREEN}[2]${NC} TLS (自签证书，自动生成)"
-    echo -e "${GREEN}[3]${NC} TLS (CA签发证书)"
-    echo -e "${GREEN}[4]${NC} TLS+WebSocket (自签证书，伪装HTTPS流量)"
-    echo -e "${GREEN}[5]${NC} TLS+WebSocket (CA证书，伪装HTTPS流量)"
+    echo -e "${GREEN}[2]${NC} WebSocket (ws)"
+    echo -e "${GREEN}[3]${NC} TLS (自签证书，自动生成)"
+    echo -e "${GREEN}[4]${NC} TLS (CA签发证书)"
+    echo -e "${GREEN}[5]${NC} TLS+WebSocket (自签证书)"
+    echo -e "${GREEN}[6]${NC} TLS+WebSocket (CA证书)"
     echo ""
 
     while true; do
-        read -p "请输入选择 [1-5]: " transport_choice
+        read -p "请输入选择 [1-6]: " transport_choice
         case $transport_choice in
             1)
                 SECURITY_LEVEL="standard"
@@ -3433,6 +4036,19 @@ configure_exit_server() {
                 break
                 ;;
             2)
+                SECURITY_LEVEL="ws"
+                echo -e "${GREEN}已选择: WebSocket${NC}"
+
+                # WebSocket路径配置
+                echo ""
+                read -p "请输入WebSocket路径 [默认: /ws]: " WS_PATH
+                if [ -z "$WS_PATH" ]; then
+                    WS_PATH="/ws"
+                fi
+                echo -e "${GREEN}WebSocket路径设置为: $WS_PATH${NC}"
+                break
+                ;;
+            3)
                 SECURITY_LEVEL="tls_self"
                 echo -e "${GREEN}已选择: TLS自签证书${NC}"
 
@@ -3447,6 +4063,20 @@ configure_exit_server() {
                 break
                 ;;
             3)
+                SECURITY_LEVEL="tls_self"
+                echo -e "${GREEN}已选择: TLS自签证书${NC}"
+
+                # TLS服务器名称配置
+                echo ""
+                read -p "请输入TLS服务器名称 (SNI) [默认www.tesla.com]: " TLS_SERVER_NAME
+                if [ -z "$TLS_SERVER_NAME" ]; then
+                    TLS_SERVER_NAME=$(get_random_mask_domain)
+                    echo -e "${GREEN}已设置默认伪装域名: $TLS_SERVER_NAME${NC}"
+                fi
+                echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
+                break
+                ;;
+            4)
                 SECURITY_LEVEL="tls_ca"
                 echo -e "${GREEN}已选择: TLS CA证书${NC}"
 
@@ -3474,7 +4104,7 @@ configure_exit_server() {
                 echo -e "${GREEN}TLS配置完成${NC}"
                 break
                 ;;
-            4)
+            5)
                 SECURITY_LEVEL="ws_tls_self"
                 echo -e "${GREEN}已选择: TLS+WebSocket自签证书${NC}"
 
@@ -3495,7 +4125,7 @@ configure_exit_server() {
                 echo -e "${GREEN}WebSocket路径设置为: $WS_PATH${NC}"
                 break
                 ;;
-            5)
+            6)
                 SECURITY_LEVEL="ws_tls_ca"
                 echo -e "${GREEN}已选择: TLS+WebSocket CA证书${NC}"
 
@@ -3530,7 +4160,7 @@ configure_exit_server() {
                 break
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-5${NC}"
+                echo -e "${RED}无效选择，请输入 1-6${NC}"
                 ;;
         esac
     done
@@ -3970,8 +4600,8 @@ get_latest_realm_version() {
 
     # 如果失败，使用硬编码版本号
     if [ -z "$latest_version" ]; then
-        echo -e "${YELLOW}使用当前最新版本 v2.8.0${NC}" >&2
-        latest_version="v2.8.0"
+        echo -e "${YELLOW}使用当前最新版本 v2.9.0${NC}" >&2
+        latest_version="v2.9.0"
     fi
 
     echo -e "${GREEN}✓ 检测到最新版本: ${latest_version}${NC}" >&2
@@ -4659,7 +5289,143 @@ generate_endpoints_from_rules() {
             $transport_config"
         fi
 
-        endpoint_config="$endpoint_config
+        # 添加MPTCP网络配置 - 从对应的规则文件读取MPTCP设置
+        local mptcp_config=""
+        local rule_file_for_port="${port_rule_files[$port_key]}"
+
+        if [ -f "$rule_file_for_port" ]; then
+            # 临时保存当前变量状态
+            local saved_vars=$(declare -p RULE_ID RULE_NAME MPTCP_MODE 2>/dev/null || true)
+
+            # 读取该端口对应的规则文件
+            if read_rule_file "$rule_file_for_port"; then
+                local mptcp_mode="${MPTCP_MODE:-off}"
+                local send_mptcp="false"
+                local accept_mptcp="false"
+
+                case "$mptcp_mode" in
+                    "send")
+                        send_mptcp="true"
+                        ;;
+                    "accept")
+                        accept_mptcp="true"
+                        ;;
+                    "both")
+                        send_mptcp="true"
+                        accept_mptcp="true"
+                        ;;
+                esac
+
+                # 只有在需要MPTCP时才添加network配置
+                if [ "$send_mptcp" = "true" ] || [ "$accept_mptcp" = "true" ]; then
+                    mptcp_config=",
+            \"network\": {
+                \"send_mptcp\": $send_mptcp,
+                \"accept_mptcp\": $accept_mptcp
+            }"
+                fi
+            fi
+
+            # 恢复变量状态（如果有保存的话）
+            if [ -n "$saved_vars" ]; then
+                eval "$saved_vars" 2>/dev/null || true
+            fi
+        fi
+
+        # 添加Proxy网络配置 - 从对应的规则文件读取Proxy设置
+        local proxy_config=""
+        if [ -f "$rule_file_for_port" ]; then
+            # 临时保存当前变量状态
+            local saved_vars=$(declare -p RULE_ID RULE_NAME PROXY_MODE 2>/dev/null || true)
+
+            # 读取该端口对应的规则文件
+            if read_rule_file "$rule_file_for_port"; then
+                local proxy_mode="${PROXY_MODE:-off}"
+                local send_proxy="false"
+                local accept_proxy="false"
+                local send_proxy_version="2"
+
+                case "$proxy_mode" in
+                    "v1_send")
+                        send_proxy="true"
+                        send_proxy_version="1"
+                        ;;
+                    "v1_accept")
+                        accept_proxy="true"
+                        send_proxy_version="1"
+                        ;;
+                    "v1_both")
+                        send_proxy="true"
+                        accept_proxy="true"
+                        send_proxy_version="1"
+                        ;;
+                    "v2_send")
+                        send_proxy="true"
+                        send_proxy_version="2"
+                        ;;
+                    "v2_accept")
+                        accept_proxy="true"
+                        send_proxy_version="2"
+                        ;;
+                    "v2_both")
+                        send_proxy="true"
+                        accept_proxy="true"
+                        send_proxy_version="2"
+                        ;;
+                esac
+
+                # 只有在需要Proxy时才添加配置
+                if [ "$send_proxy" = "true" ] || [ "$accept_proxy" = "true" ]; then
+                    local proxy_fields=""
+                    if [ "$send_proxy" = "true" ]; then
+                        proxy_fields="\"send_proxy\": $send_proxy,
+                \"send_proxy_version\": $send_proxy_version"
+                    fi
+                    if [ "$accept_proxy" = "true" ]; then
+                        if [ -n "$proxy_fields" ]; then
+                            proxy_fields="$proxy_fields,
+                \"accept_proxy\": $accept_proxy,
+                \"accept_proxy_timeout\": 5"
+                        else
+                            proxy_fields="\"accept_proxy\": $accept_proxy,
+                \"accept_proxy_timeout\": 5"
+                        fi
+                    fi
+
+                    if [ -n "$mptcp_config" ]; then
+                        # 如果已有MPTCP配置，在network内添加Proxy配置
+                        proxy_config=",
+                $proxy_fields"
+                    else
+                        # 如果没有MPTCP配置，创建新的network配置
+                        proxy_config=",
+            \"network\": {
+                $proxy_fields
+            }"
+                    fi
+                fi
+            fi
+
+            # 恢复变量状态（如果有保存的话）
+            if [ -n "$saved_vars" ]; then
+                eval "$saved_vars" 2>/dev/null || true
+            fi
+        fi
+
+        # 合并MPTCP和Proxy配置
+        local network_config=""
+        if [ -n "$mptcp_config" ] && [ -n "$proxy_config" ]; then
+            # 两者都有，合并到一个network块中
+            network_config=$(echo "$mptcp_config" | sed 's/}//')
+            network_config="$network_config$proxy_config
+            }"
+        elif [ -n "$mptcp_config" ]; then
+            network_config="$mptcp_config"
+        elif [ -n "$proxy_config" ]; then
+            network_config="$proxy_config"
+        fi
+
+        endpoint_config="$endpoint_config$network_config
         }"
 
         endpoints="$endpoints$endpoint_config"
@@ -5132,7 +5898,7 @@ EOF
 
 # 智能安装和配置流程
 smart_install() {
-    echo -e "${GREEN}=== xwPF Realm 一键脚本智能安装 v1.0.0 ===${NC}"
+    echo -e "${GREEN}=== xwPF Realm 一键脚本智能安装 $SCRIPT_VERSION ===${NC}"
     echo ""
 
     # 步骤1: 检测系统
@@ -5283,7 +6049,23 @@ service_status() {
                     if [ -n "$RULE_NOTE" ]; then
                         note_display=" | 备注: $RULE_NOTE"
                     fi
-                    echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
+                    # 添加MPTCP状态显示
+                    local mptcp_mode="${MPTCP_MODE:-off}"
+                    local mptcp_display=""
+                    if [ "$mptcp_mode" != "off" ]; then
+                        local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+                        local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+                        mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+                    fi
+                    # 添加Proxy状态显示
+                    local proxy_mode="${PROXY_MODE:-off}"
+                    local proxy_display=""
+                    if [ "$proxy_mode" != "off" ]; then
+                        local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+                        local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+                        proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+                    fi
+                    echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
 
                 fi
             fi
@@ -5872,7 +6654,23 @@ show_config() {
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: $RULE_NOTE"
                         fi
-                        echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
+                        # 添加MPTCP状态显示
+                        local mptcp_mode="${MPTCP_MODE:-off}"
+                        local mptcp_display=""
+                        if [ "$mptcp_mode" != "off" ]; then
+                            local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+                            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+                            mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+                        fi
+                        # 添加Proxy状态显示
+                        local proxy_mode="${PROXY_MODE:-off}"
+                        local proxy_display=""
+                        if [ "$proxy_mode" != "off" ]; then
+                            local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+                            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+                            proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+                        fi
+                        echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
 
                         if [ "$SECURITY_LEVEL" = "tls_self" ]; then
                             local display_sni="${TLS_SERVER_NAME:-$DEFAULT_SNI_DOMAIN}"
@@ -6038,7 +6836,23 @@ show_brief_status() {
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: $RULE_NOTE"
                         fi
-                        echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
+                        # 添加MPTCP状态显示
+                        local mptcp_mode="${MPTCP_MODE:-off}"
+                        local mptcp_display=""
+                        if [ "$mptcp_mode" != "off" ]; then
+                            local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+                            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+                            mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+                        fi
+                        # 添加Proxy状态显示
+                        local proxy_mode="${PROXY_MODE:-off}"
+                        local proxy_display=""
+                        if [ "$proxy_mode" != "off" ]; then
+                            local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+                            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+                            proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+                        fi
+                        echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
 
                     fi
                 fi
@@ -6074,7 +6888,23 @@ show_brief_status() {
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: $RULE_NOTE"
                         fi
-                        echo -e "    安全: ${YELLOW}$security_display${NC}${note_display}"
+                        # 添加MPTCP状态显示
+                        local mptcp_mode="${MPTCP_MODE:-off}"
+                        local mptcp_display=""
+                        if [ "$mptcp_mode" != "off" ]; then
+                            local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+                            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+                            mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+                        fi
+                        # 添加Proxy状态显示
+                        local proxy_mode="${PROXY_MODE:-off}"
+                        local proxy_display=""
+                        if [ "$proxy_mode" != "off" ]; then
+                            local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+                            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+                            proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+                        fi
+                        echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
 
                     fi
                 fi
@@ -6176,6 +7006,13 @@ get_security_display() {
     case "$security_level" in
         "standard")
             echo "默认传输"
+            ;;
+        "ws")
+            if [ -n "$ws_path" ]; then
+                echo "WebSocket (路径: $ws_path)"
+            else
+                echo "WebSocket"
+            fi
             ;;
         "tls_self")
             echo "TLS自签证书"
@@ -6482,6 +7319,8 @@ download_speedtest_script() {
     local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
     local target_path="/etc/realm/speedtest.sh"
 
+    echo -e "${YELLOW}首次使用测速功能，正在下载测速脚本...${NC}"
+
     # 创建目录
     mkdir -p "$(dirname "$target_path")"
 
@@ -6519,12 +7358,13 @@ download_speedtest_script() {
 speedtest_menu() {
     local speedtest_script="/etc/realm/speedtest.sh"
 
-    # 每次都更新测速脚本
-    echo -e "${YELLOW}正在下载测速脚本...${NC}"
-    if ! download_speedtest_script; then
-        echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
-        read -p "按回车键返回主菜单..."
-        return 1
+    # 检查测速脚本是否存在
+    if [ ! -f "$speedtest_script" ]; then
+        if ! download_speedtest_script; then
+            echo -e "${RED}无法下载测速脚本，功能暂时不可用${NC}"
+            read -p "按回车键返回主菜单..."
+            return 1
+        fi
     fi
 
     # 检查脚本是否可执行
@@ -6533,7 +7373,7 @@ speedtest_menu() {
     fi
 
     # 调用测速脚本
-    echo -e "${BLUE}启动测速工具...${NC}"
+    echo -e "${BLUE}启动中转工具...${NC}"
     echo ""
     bash "$speedtest_script"
 
@@ -6546,7 +7386,7 @@ speedtest_menu() {
 show_menu() {
     while true; do
         clear
-        echo -e "${GREEN}=== xwPF Realm全功能一键脚本 v1.0.0 ===${NC}"
+        echo -e "${GREEN}=== xwPF Realm全功能一键脚本 $SCRIPT_VERSION ===${NC}"
         echo -e "${GREEN}作者主页:https://zywe.de${NC}"
         echo -e "${GREEN}项目开源:https://github.com/zywe03/realm-xwPF${NC}"
         echo -e "${GREEN}一个开箱即用、轻量可靠、灵活可控的 Realm 转发管理工具${NC}"
