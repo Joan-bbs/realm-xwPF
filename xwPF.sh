@@ -4533,17 +4533,21 @@ download_from_sources() {
             source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
         fi
 
-        echo -e "${BLUE}尝试 $source_name${NC}"
+        # 将状态消息重定向到 stderr (>&2)
+        echo -e "${BLUE}尝试 $source_name${NC}" >&2
 
         if curl -fsSL --connect-timeout "$connect_timeout" --max-time "$timeout" "$full_url" -o "$target_path"; then
-            echo -e "${GREEN}✓ $source_name 下载成功${NC}"
+            # 将状态消息重定向到 stderr (>&2)
+            echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
             return 0
         else
-            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
+            # 将状态消息重定向到 stderr (>&2)
+            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}" >&2
         fi
     done
 
-    echo -e "${RED}✗ 所有下载源均失败${NC}"
+    # 将状态消息重定向到 stderr (>&2)
+    echo -e "${RED}✗ 所有下载源均失败${NC}" >&2
     return 1
 }
 
