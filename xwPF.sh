@@ -36,9 +36,9 @@ NC='\033[0m'          # 重置颜色
 # 全局多源下载配置
 DOWNLOAD_SOURCES=(
     ""  # 官方源
-    "https://proxy.vvvv.ee/"
-    "https://demo.52013120.xyz/"
     "https://ghfast.top/"
+    "https://gh.222322.xyz/"
+    "https://ghproxy.gpnu.org/"
 )
 
 # 核心路径变量
@@ -1381,6 +1381,22 @@ export_config_package() {
         echo -e "${GREEN}✓${NC} 已收集健康状态文件"
     fi
 
+    # 复制MPTCP配置文件
+    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
+    if [ -f "$mptcp_conf" ]; then
+        cp "$mptcp_conf" "${package_dir}/90-enable-MPTCP.conf"
+        echo -e "${GREEN}✓${NC} 已收集MPTCP系统配置文件"
+    fi
+
+    # 导出MPTCP端点配置
+    if command -v ip >/dev/null 2>&1 && /usr/bin/ip mptcp endpoint show >/dev/null 2>&1; then
+        local endpoints_output=$(/usr/bin/ip mptcp endpoint show 2>/dev/null)
+        if [ -n "$endpoints_output" ]; then
+            echo "$endpoints_output" > "${package_dir}/mptcp_endpoints.conf"
+            echo -e "${GREEN}✓${NC} 已收集MPTCP端点配置"
+        fi
+    fi
+
     # 创建压缩包
     echo -e "${YELLOW}正在创建压缩包...${NC}"
     cd "$temp_dir"
@@ -1577,6 +1593,36 @@ import_config_package() {
         echo -e "${GREEN}✓${NC} 恢复健康状态文件"
     fi
 
+    # 恢复MPTCP系统配置文件
+    if [ -f "${config_dir}/90-enable-MPTCP.conf" ]; then
+        local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
+        cp "${config_dir}/90-enable-MPTCP.conf" "$mptcp_conf"
+        echo -e "${GREEN}✓${NC} 恢复MPTCP系统配置文件"
+        # 立即应用MPTCP配置
+        sysctl -p "$mptcp_conf" >/dev/null 2>&1
+    fi
+
+    # 恢复MPTCP端点配置
+    if [ -f "${config_dir}/mptcp_endpoints.conf" ] && command -v ip >/dev/null 2>&1; then
+        echo -e "${YELLOW}正在恢复MPTCP端点配置...${NC}"
+        # 先清理现有端点
+        /usr/bin/ip mptcp endpoint flush 2>/dev/null
+        # 恢复端点配置
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                # 解析端点信息：IP地址 id 数字 类型 dev 接口名
+                local addr=$(echo "$line" | awk '{print $1}')
+                local dev=$(echo "$line" | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+                local flags=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="subflow" || $i=="signal" || $i=="fullmesh") print $i}')
+
+                if [ -n "$addr" ] && [ -n "$dev" ] && [ -n "$flags" ]; then
+                    /usr/bin/ip mptcp endpoint add "$addr" dev "$dev" "$flags" 2>/dev/null
+                fi
+            fi
+        done < "${config_dir}/mptcp_endpoints.conf"
+        echo -e "${GREEN}✓${NC} 恢复MPTCP端点配置"
+    fi
+
     # 清理临时目录
     rm -rf "$(dirname "$config_dir")"
 
@@ -1591,28 +1637,6 @@ import_config_package() {
         echo -e "${RED}✗ 配置导入失败${NC}"
     fi
 
-    echo ""
-    read -p "按回车键返回..."
-}
-
-# 兼容旧JSON格式的导入功能（保留作为备用）
-import_legacy_json_config() {
-    echo -e "${YELLOW}=== 导入传统JSON配置 ===${NC}"
-    echo ""
-    echo -e "${BLUE}此功能用于导入非脚本生成的JSON配置文件${NC}"
-    echo -e "${YELLOW}建议优先使用配置包导入功能${NC}"
-    echo ""
-
-    read -p "确认继续使用传统导入？(y/n): " confirm
-    if ! echo "$confirm" | grep -qE "^[Yy]$"; then
-        echo -e "${BLUE}已取消操作${NC}"
-        read -p "按回车键返回..."
-        return
-    fi
-
-    echo ""
-    echo -e "${RED}传统JSON导入功能已移除，请使用配置包导入${NC}"
-    echo -e "${YELLOW}如需导入外部JSON配置，请联系脚本作者${NC}"
     echo ""
     read -p "按回车键返回..."
 }
@@ -5166,8 +5190,8 @@ reliable_download() {
 get_latest_realm_version() {
     echo -e "${YELLOW}获取最新版本信息...${NC}" >&2
 
-    # 直接解析releases页面获取版本号
-    local latest_version=$(curl -sL "https://github.com/zhboner/realm/releases" 2>/dev/null | \
+    # 直接解析releases页面获取版本号，超时机制
+    local latest_version=$(curl -sL --connect-timeout 5 --max-time 8 "https://github.com/zhboner/realm/releases" 2>/dev/null | \
         head -2100 | \
         sed -n 's|.*releases/tag/v\([0-9.]*\).*|v\1|p' | head -1)
 
@@ -6979,6 +7003,24 @@ uninstall_realm() {
         fi
     done
     wait  # 等待所有并行搜索完成
+
+    # 清理MPTCP配置文件
+    echo -e "${BLUE}清理MPTCP配置文件...${NC}"
+    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
+    if [ -f "$mptcp_conf" ]; then
+        echo -e "${YELLOW}发现MPTCP配置文件: $mptcp_conf${NC}"
+        rm -f "$mptcp_conf" && echo -e "${GREEN}✓${NC} 已删除MPTCP配置文件"
+    fi
+
+    # 清理MPTCP端点配置
+    if command -v ip >/dev/null 2>&1 && /usr/bin/ip mptcp endpoint show >/dev/null 2>&1; then
+        local endpoints_output=$(/usr/bin/ip mptcp endpoint show 2>/dev/null)
+        if [ -n "$endpoints_output" ]; then
+            echo -e "${BLUE}清理MPTCP端点配置...${NC}"
+            /usr/bin/ip mptcp endpoint flush 2>/dev/null
+            echo -e "${GREEN}✓${NC} 已清理所有MPTCP端点"
+        fi
+    fi
 
     # 全面清理临时文件、缓存和下载文件
     echo -e "${BLUE}全面清理临时文件和缓存...${NC}"

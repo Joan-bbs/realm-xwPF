@@ -31,7 +31,7 @@
 ## 🚀 快速开始
 
 ### 一键安装
-
+使用wegt
 ```bash
 wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
@@ -39,7 +39,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 ### 网络受限使用加速源,一键安装
 
 ```bash
-wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://ghfast.top/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ## 🧭 无法联网的离线安装
@@ -67,15 +67,16 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 
 ## ✨ 核心特性
 
-- **🚀 快速体验** -一键安装快速上手体验网络转发的乐趣
+- **🚀 快速体验** -一键安装快速轻量上手体验网络转发
 - **🔄 故障转移** - 使用系统工具,完成自动故障检测,保持轻量化
 - **⚖️ 负载均衡** - 支持轮询、IP哈希等策略，可配置权重分配
 - **🕳️ 搭建隧道** - 双端realm架构支持 TLS，ws 加密传输,搭建隧道
 - **✍️ 规则备注** - 清晰的备注功能,不再需要额外记忆
+- **💻 直观配置系统MPTCP** - 清晰的展示MPTCP界面
 - **🛜 网络链路测试** - 测试链路延迟、带宽、稳定性,路由是否绕路
 
-- **📋 导出配置文件** - 查看当前配置,复制粘贴成.json文件导出
-- **📒 导入配置文件** - 自动识别同目录 JSON 配置文件导入,或输入文件完整路径识别导入
+- **📋 一键导出** - 打包全部文件为压缩包自由迁移(包括备注等等信息完全迁移)
+- **📒 一键导入** - 识别导出的压缩包完成自由迁移
 - **⏰ 定时任务** - 支持定时重启、响应ddns域名更新解析
 - **🔧 智能检测** - 自动检测系统架构、端口冲突,连接可用性
 
@@ -83,12 +84,15 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 - **🗑️ 完整卸载** - 分阶段全面清理，“轻轻的我走了，正如我轻轻的来”
 - **⚡ 原生Realm全功能** - 支持最新版realm的所有原生功能
 - tcp/udp协议
+- ws/wss/tls加密
 - 单中转多出口
 - 多中转单出口
+- Proxy Protocol
+- MPTCP
 - 指定中转机的某个入口 IP,以及指定某个出口 IP (适用于多IP情况和一入口多出口和多入口一出口的情况)
 - 更多玩法参考[zhboner/realm](https://github.com/zhboner/realm)
 
-## 🗺️ 示意图理解不同场景下工作原理(推荐)
+## 🗺️ 示意图理解不同场景下工作原理(推荐阅读)
 
 <details>
 <summary><strong>单端realm架构只负责转发（常见）</strong></summary>
@@ -169,6 +173,32 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 </details>
 
 <details>
+<summary>
+<strong>双端realm调用系统MPTCP</strong>
+</summary>
+
+MPTCP端点不是创建一张新的虚拟网卡，而是：
+告诉MPTCP协议栈：这个IP地址可以用于MPTCP连接
+指定路径：数据可以通过这个IP地址和对应的网卡传输
+建立多路径：让一个TCP连接可以同时使用多个网络路径
+
+**Q:为什么需要同时指定IP和网卡？**
+网卡接口：系统需要知道这个IP地址对应哪个物理网卡，用于路由选择
+IP地址：MPTCP协议需要知道可以使用哪些IP地址建立子流
+192.168.1.100 dev eth0 subflow = 告诉MPTCP可以通过eth0网卡的这个IP建立连接
+10.0.0.50 dev eth1 subflow = 告诉MPTCP可以通过eth1网卡的这个IP建立连接
+
+如果想要更精细的控制，可以考虑：
+
+服务端也设置subflow端点：
+让服务端主动发起到中转机的连接，可能或许提高连接建立速度
+使用fullmesh模式：
+在网络环境复杂时提供更多连接路径
+但会增加复杂性
+
+</details>
+
+<details>
 <summary><strong>端口转发 vs 链式代理(分段代理)</strong></summary>
 
 容易搞混的两个概念
@@ -205,6 +235,7 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 | `nc` | 网络连接测试 | ✅ |
 | `grep`/`cut` | 文本处理识别 | ✅ |
 | `inotify` | 标记文件 | ✅ |
+| `iproute2` | MPTCP端点管理 | ✅ |
 
 ## 📁 文件结构
 
@@ -234,6 +265,9 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 │   ├── realm-health-check.service  # 健康检查服务
 │   └── realm-health-check.timer    # 健康检查定时器
 │
+├── /etc/sysctl.d/
+│   └── 90-enable-MPTCP.conf     # MPTCP系统配置文件
+│
 └── /var/log/
     └── realm.log                # 服务日志文件
 ```
@@ -247,7 +281,7 @@ wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-x
 ## 🙏 致谢
 
 - [zhboner/realm](https://github.com/zhboner/realm) - 提供核心的 Realm 程序
-- "https://demo.52013120.xyz/""https://proxy.vvvv.ee/""https://ghfast.top/"  -提供公益加速源
+- "https://ghfast.top/""https://ghproxy.gpnu.org/""https://gh.222322.xyz/"  -提供公益加速源
 - 所有为项目提供反馈和建议的用户
 
 ---
