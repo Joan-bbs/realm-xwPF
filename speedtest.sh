@@ -231,7 +231,8 @@ install_apt_tool() {
     local package="$2"
 
     echo -e "${BLUE}🔧 安装 $tool...${NC}"
-    if apt-get install -y "$package" >/dev/null 2>&1; then
+    # 设置非交互模式，防止安装时等待用户确认
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" >/dev/null 2>&1; then
         echo -e "${GREEN}✅ $tool 安装成功${NC}"
         TOOL_STATUS["$tool"]="installed"
         return 0
@@ -274,8 +275,8 @@ install_missing_tools() {
 
     echo -e "${YELLOW}📦 安装缺失工具: ${missing_tools[*]}${NC}"
 
-    # 更新包列表
-    apt-get update >/dev/null 2>&1
+    # 更新包列表（非交互模式）
+    DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1
 
     local install_failed=false
 
@@ -758,7 +759,7 @@ run_tcp_single_thread_test() {
 
     # 后台执行iperf3，前台显示倒计时
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP单线程测试"
@@ -771,7 +772,7 @@ run_tcp_single_thread_test() {
     if [ $exit_code -ne 0 ]; then
         sleep 0.5
         : > "$temp_result"
-        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M > "$temp_result" 2>&1) &
+        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
         local test_pid2=$!
         show_progress_bar "$TEST_DURATION" "TCP单线程测试"
         wait $test_pid2
@@ -805,15 +806,15 @@ run_tcp_single_thread_test() {
             fi
 
             echo -e "${GREEN}TCP上行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f M${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
 
-            # 计算Mbps，MiB/s直接使用MBytes/sec值
+            # 计算Mbps，MB/s直接使用MBytes/sec值
             local mbps=$(awk "BEGIN {printf \"%.0f\", $final_bitrate * 8}")
 
-            echo -e "平均发送速率 (Sender): ${YELLOW}${mbps:-N/A} Mbps${NC} (${YELLOW}${final_bitrate:-N/A} MiB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
+            echo -e "平均发送速率 (Sender): ${YELLOW}${mbps:-N/A} Mbps${NC} (${YELLOW}${final_bitrate:-N/A} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
 
             # 获取TCP拥塞控制算法
             local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
@@ -891,7 +892,7 @@ run_bandwidth_tests() {
     fi
 
     # 预热：快速建立控制通道，提升首项成功率（输出丢弃，不影响报告）
-    iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t 1 -f M >/dev/null 2>&1 || true
+    iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t 1 -f m >/dev/null 2>&1 || true
     sleep 1
 
     # 执行TCP上行测试
@@ -930,7 +931,7 @@ run_udp_single_test() {
 
     # 后台执行iperf3，前台显示倒计时
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f M > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
     local test_pid=$!
     show_progress_bar "$TEST_DURATION" "UDP单线程测试"
     # 等待测试完成
@@ -953,7 +954,7 @@ run_udp_single_test() {
             local final_bitrate=$(parse_iperf3_data "$sender_line" "bitrate")
 
             echo -e "${GREEN}UDP上行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f M${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f m${NC}"
             echo ""
             echo -e "${YELLOW}📡 传输统计${NC}"
             echo ""
@@ -973,13 +974,13 @@ run_udp_single_test() {
                 local jitter=$(parse_iperf3_data "$receiver_line" "jitter")
                 local loss_info=$(parse_iperf3_data "$receiver_line" "loss")
 
-                # 计算有效吞吐量 (接收端数据)，MiB/s直接使用MBytes/sec值
+                # 计算有效吞吐量 (接收端数据)，MB/s直接使用MBytes/sec值
                 local recv_mbps=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate * 8}")
 
                 # 计算目标速率显示（与-b参数一致）
                 local target_mbps=$(echo "$udp_bandwidth" | sed 's/M$//')
 
-                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps:-N/A} Mbps${NC} (${YELLOW}${receiver_bitrate:-N/A} MiB/s${NC})"
+                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps:-N/A} Mbps${NC} (${YELLOW}${receiver_bitrate:-N/A} MB/s${NC})"
                 echo -e "丢包率 (Packet Loss): ${YELLOW}${loss_info:-N/A}${NC}"
                 echo -e "网络抖动 (Jitter): ${YELLOW}${jitter:-N/A} ms${NC}"
 
@@ -1023,7 +1024,7 @@ run_tcp_download_test() {
 
     # 后台执行测试，前台显示进度条
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f M -R > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -R > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP下行测试"
@@ -1064,15 +1065,15 @@ run_tcp_download_test() {
             fi
 
             echo -e "${GREEN}TCP下行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f M -R${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -R${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
 
-            # 计算Mbps，MiB/s直接使用MBytes/sec值
+            # 计算Mbps，MB/s直接使用MBytes/sec值
             local mbps=$(awk "BEGIN {printf \"%.0f\", $final_bitrate * 8}")
 
-            echo -e "平均下行速率 (Receiver): ${YELLOW}${mbps:-N/A} Mbps${NC} (${YELLOW}${final_bitrate:-N/A} MiB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
+            echo -e "平均下行速率 (Receiver): ${YELLOW}${mbps:-N/A} Mbps${NC} (${YELLOW}${final_bitrate:-N/A} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
 
             # 获取TCP拥塞控制算法
             local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
@@ -1140,7 +1141,7 @@ run_udp_download_test() {
 
     # 后台执行测试，前台显示进度条
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f M -R > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -u -b "$udp_bandwidth" -t "$TEST_DURATION" -f m -R > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "UDP下行测试"
@@ -1162,7 +1163,7 @@ run_udp_download_test() {
 
         if [ -n "$sender_line" ]; then
             echo -e "${GREEN}UDP下行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f M -R${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -u -b $udp_bandwidth -t $TEST_DURATION -f m -R${NC}"
             echo ""
             echo -e "${YELLOW}📡 传输统计${NC}"
             echo ""
@@ -1182,13 +1183,13 @@ run_udp_download_test() {
                 local jitter=$(parse_iperf3_data "$receiver_line" "jitter")
                 local loss_info=$(parse_iperf3_data "$receiver_line" "loss")
 
-                # 计算有效吞吐量 (接收端数据)，MiB/s直接使用MBytes/sec值
+                # 计算有效吞吐量 (接收端数据)，MB/s直接使用MBytes/sec值
                 local recv_mbps=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate * 8}")
 
                 # 计算目标速率显示（与-b参数一致）
                 local target_mbps=$(echo "$udp_bandwidth" | sed 's/M$//')
 
-                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps:-N/A} Mbps${NC} (${YELLOW}${receiver_bitrate:-N/A} MiB/s${NC})"
+                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps:-N/A} Mbps${NC} (${YELLOW}${receiver_bitrate:-N/A} MB/s${NC})"
                 echo -e "丢包率 (Packet Loss): ${YELLOW}${loss_info:-N/A}${NC}"
                 echo -e "网络抖动 (Jitter): ${YELLOW}${jitter:-N/A} ms${NC}"
 
@@ -1512,7 +1513,7 @@ parse_route_summary() {
 
 # 执行路由分析
 run_route_analysis() {
-    echo -e "${YELLOW}🟢 路由跟踪分析${NC}"
+    echo -e "${YELLOW}🟢 大包路由跟踪分析${NC}"
     echo ""
 
     # 使用nexttrace进行路由跟踪
@@ -1969,13 +1970,13 @@ generate_final_report() {
     fi
 
     if [ "$TCP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_up_speed_mbps]}" ]; then
-        printf "  ${YELLOW}%s Mbps${NC} (${YELLOW}%s MiB/s${NC})  " "${TEST_RESULTS[tcp_up_speed_mbps]}" "${TEST_RESULTS[tcp_up_speed_mibs]}"
+        printf "  ${YELLOW}%s Mbps${NC} (${YELLOW}%s MB/s${NC})  " "${TEST_RESULTS[tcp_up_speed_mbps]}" "${TEST_RESULTS[tcp_up_speed_mibs]}"
     else
         printf "  ${RED}%-21s${NC}  " "测试失败"
     fi
 
     if [ "$TCP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_down_speed_mbps]}" ]; then
-        printf "  ${YELLOW}%s Mbps${NC} (${YELLOW}%s MiB/s${NC})\n" "${TEST_RESULTS[tcp_down_speed_mbps]}" "${TEST_RESULTS[tcp_down_speed_mibs]}"
+        printf "  ${YELLOW}%s Mbps${NC} (${YELLOW}%s MB/s${NC})\n" "${TEST_RESULTS[tcp_down_speed_mbps]}" "${TEST_RESULTS[tcp_down_speed_mibs]}"
     else
         printf "  ${RED}%-21s${NC}\n" "测试失败"
     fi
@@ -2051,7 +2052,7 @@ generate_final_report() {
     # UDP上行
     if [ "$UDP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_up_speed_mbps]}" ]; then
         printf " ⬆️ 上行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
-            "${TEST_RESULTS[udp_up_speed_mbps]} Mbps (${TEST_RESULTS[udp_up_speed_mibs]} MiB/s)" \
+            "${TEST_RESULTS[udp_up_speed_mbps]} Mbps (${TEST_RESULTS[udp_up_speed_mibs]} MB/s)" \
             "${TEST_RESULTS[udp_up_loss]}" \
             "${TEST_RESULTS[udp_up_jitter]} ms"
     else
@@ -2062,7 +2063,7 @@ generate_final_report() {
     # UDP下行
     if [ "$UDP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_down_speed_mbps]}" ]; then
         printf " ⬇️ 下行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
-            "${TEST_RESULTS[udp_down_speed_mbps]} Mbps (${TEST_RESULTS[udp_down_speed_mibs]} MiB/s)" \
+            "${TEST_RESULTS[udp_down_speed_mbps]} Mbps (${TEST_RESULTS[udp_down_speed_mibs]} MB/s)" \
             "${TEST_RESULTS[udp_down_loss]}" \
             "${TEST_RESULTS[udp_down_jitter]} ms"
     else
