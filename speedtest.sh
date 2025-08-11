@@ -12,6 +12,14 @@ BLUE='\033[0;34m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
+# 全局多源下载配置
+DOWNLOAD_SOURCES=(
+    ""  # 官方源
+    "https://proxy.vvvv.ee/"
+    "https://demo.52013120.xyz/"
+    "https://ghfast.top/"
+)
+
 # 全局变量
 TARGET_IP=""
 TARGET_PORT="5201"
@@ -46,6 +54,37 @@ cleanup_on_exit() {
 
 # 全局User-Agent
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# 统一多源下载函数
+download_from_sources() {
+    local url="$1"
+    local target_path="$2"
+    local timeout="${3:-30}"
+    local connect_timeout="${4:-10}"
+
+    for proxy in "${DOWNLOAD_SOURCES[@]}"; do
+        local full_url="${proxy}${url}"
+        local source_name
+
+        if [ -z "$proxy" ]; then
+            source_name="GitHub官方源"
+        else
+            source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
+        fi
+
+        # 将状态消息重定向到 stderr (>&2)
+        echo -e "${BLUE}尝试 $source_name${NC}" >&2
+
+        if curl -fsSL --connect-timeout "$connect_timeout" --max-time "$timeout" "$full_url" -o "$target_path"; then
+            echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
+            return 0
+        else
+            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}" >&2
+        fi
+    done
+    echo -e "${RED}✗ 所有下载源均失败${NC}" >&2
+    return 1
+}
 
 # 全局测试结果数据结构
 declare -A TEST_RESULTS=(
@@ -195,32 +234,11 @@ install_nexttrace() {
             ;;
     esac
 
-    # 多源下载nexttrace
-    local sources=(
-        ""  # 官方源
-        "https://ghproxy.com/"
-        "https://proxy.vvvv.ee/"
-    )
-
-    local download_success=false
-    for prefix in "${sources[@]}"; do
-        local full_url="${prefix}${download_url}"
-        echo -e "${BLUE}尝试下载: ${full_url}${NC}"
-
-        if curl -fsSL --connect-timeout 10 --max-time 60 "$full_url" -o /usr/local/bin/nexttrace; then
-            chmod +x /usr/local/bin/nexttrace
-            echo -e "${GREEN}✅ nexttrace 下载成功${NC}"
-            download_success=true
-            break
-        else
-            echo -e "${RED}✗ 下载失败，尝试下一个源...${NC}"
-        fi
-    done
-
-    if [ "$download_success" = true ]; then
+    # 使用统一多源下载函数
+    if download_from_sources "$download_url" "/usr/local/bin/nexttrace" 60 10; then
+        chmod +x /usr/local/bin/nexttrace
         return 0
     else
-        echo -e "${RED}✗ 所有下载源均失败${NC}"
         return 1
     fi
 }
@@ -2293,38 +2311,11 @@ manual_update_script() {
     echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
 
     local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
-    local download_success=false
-    local sources=(
-        ""  # 官方源
-        "https://proxy.vvvv.ee/"
-        "https://demo.52013120.xyz/"
-        "https://ghfast.top/"
-    )
 
-    for proxy in "${sources[@]}"; do
-        local full_url="${proxy}${script_url}"
-        local source_name
-
-        if [ -z "$proxy" ]; then
-            source_name="GitHub官方源"
-        else
-            source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
-        fi
-
-        echo -e "${BLUE}尝试 $source_name${NC}"
-
-        if curl -fsSL "$full_url" -o "$current_script" 2>/dev/null; then
-            chmod +x "$current_script"
-            echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
-            download_success=true
-            break
-        else
-            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
-        fi
-    done
-
-    echo ""
-    if [ "$download_success" = true ]; then
+    # 使用统一多源下载函数
+    if download_from_sources "$script_url" "$current_script" 30 10; then
+        chmod +x "$current_script"
+        echo ""
         echo -e "${GREEN}✅ 脚本更新完成${NC}"
         echo -e "${YELLOW}重新启动脚本以使用最新版本${NC}"
         echo ""
@@ -2332,63 +2323,14 @@ manual_update_script() {
         read -n 1 -s
         exec "$current_script"
     else
-        echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
+        echo ""
+        echo -e "${RED}✗ 脚本更新失败${NC}"
         echo -e "${BLUE}继续使用现有脚本版本${NC}"
         echo ""
         echo -e "${WHITE}按任意键返回主菜单...${NC}"
         read -n 1 -s
     fi
 }
-
-# 自动更新脚本 (由xwPF.sh调用时执行)
-auto_update_script() {
-    # 获取当前脚本路径
-    local current_script="$0"
-
-    echo -e "${GREEN}✓ 正在更新测速脚本...${NC}"
-
-    # 自动从GitHub下载最新版本覆盖更新
-    echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
-
-    local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
-    local download_success=false
-    local sources=(
-        ""  # 官方源
-        "https://proxy.vvvv.ee/"
-        "https://demo.52013120.xyz/"
-        "https://ghfast.top/"
-    )
-
-    for proxy in "${sources[@]}"; do
-        local full_url="${proxy}${script_url}"
-        local source_name
-
-        if [ -z "$proxy" ]; then
-            source_name="GitHub官方源"
-        else
-            source_name="加速源: $(echo "$proxy" | sed 's|https://||' | sed 's|/$||')"
-        fi
-
-        echo -e "${BLUE}尝试 $source_name${NC}"
-
-        if curl -fsSL "$full_url" -o "$current_script" 2>/dev/null; then
-            chmod +x "$current_script"
-            echo -e "${GREEN}✓ $source_name 脚本更新成功${NC}"
-            download_success=true
-            break
-        else
-            echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}"
-        fi
-    done
-
-    if [ "$download_success" = false ]; then
-        echo -e "${RED}✗ 所有源脚本更新均失败${NC}"
-        echo -e "${BLUE}使用现有脚本版本${NC}"
-    fi
-
-    echo ""
-}
-
 # 主函数
 main() {
     check_root
