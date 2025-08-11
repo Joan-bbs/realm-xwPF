@@ -740,17 +740,18 @@ show_progress_bar() {
     echo ""
 }
 
-# 解析iperf3数据的通用函数
+# 解析iperf3输出数据
 parse_iperf3_data() {
     local line="$1"
-    local data_type="$2"  # "transfer" 或 "bitrate" 或 "retrans" 或 "jitter" 或 "loss"
+    local data_type="$2"
 
     case "$data_type" in
         "transfer")
             echo "$line" | grep -o '[0-9.]\+\s*MBytes' | head -1 | grep -o '[0-9.]\+'
             ;;
         "bitrate")
-            echo "$line" | grep -o '[0-9.]\+\s*MBytes/sec' | head -1 | grep -o '[0-9.]\+'
+            # 提取Mbits/sec数值
+            echo "$line" | grep -o '[0-9.]\+\s*Mbits/sec' | head -1 | grep -o '[0-9.]\+'
             ;;
         "retrans")
             echo "$line" | grep -o '[0-9]\+\s*sender$' | grep -o '[0-9]\+' || echo "0"
@@ -770,7 +771,7 @@ parse_iperf3_data() {
     esac
 }
 
-# 执行TCP上行带宽测试
+# TCP上行测试
 run_tcp_single_thread_test() {
     echo -e "${GREEN}🚀 TCP上行带宽测试 - 目标: ${TARGET_IP}:${TARGET_PORT}${NC}"
     echo ""
@@ -812,10 +813,10 @@ run_tcp_single_thread_test() {
             local final_transfer=$(parse_iperf3_data "$final_line" "transfer")
             local final_bitrate=$(parse_iperf3_data "$final_line" "bitrate")
 
-            # 从整行中提取重传次数 (在sender行的倒数第二个字段)
+            # 提取重传次数
             local final_retrans=$(echo "$final_line" | awk '{print $(NF-1)}')
 
-            # 解析CPU使用率
+            # CPU使用率
             local cpu_local=""
             local cpu_remote=""
             if [ -n "$cpu_line" ]; then
@@ -830,9 +831,14 @@ run_tcp_single_thread_test() {
             echo ""
 
             # 计算Mbps，MB/s直接使用MBytes/sec值
-            local mbps=$(awk "BEGIN {printf \"%.0f\", $final_bitrate * 8}")
+            local mbps="N/A"
+            local mb_per_sec="N/A"
+            if [ -n "$final_bitrate" ] && [[ "$final_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                mbps=$(awk "BEGIN {printf \"%.0f\", $final_bitrate}")
+                mb_per_sec=$(awk "BEGIN {printf \"%.1f\", $final_bitrate / 8}")
+            fi
 
-            echo -e "平均发送速率 (Sender): ${YELLOW}${mbps:-N/A} Mbps${NC} (${YELLOW}${final_bitrate:-N/A} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
+            echo -e "平均发送速率 (Sender): ${YELLOW}${mbps} Mbps${NC} (${YELLOW}${mb_per_sec} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
 
             # 获取TCP拥塞控制算法
             local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
@@ -849,7 +855,7 @@ run_tcp_single_thread_test() {
             # 显示重传次数（不计算重传率，避免估算误差）
             echo -e "重传次数: ${YELLOW}${final_retrans:-0} 次${NC}"
 
-            # 显示CPU负载
+            # CPU负载
             if [ -n "$cpu_local" ] && [ -n "$cpu_remote" ]; then
                 echo -e "CPU 负载: 发送端 ${YELLOW}${cpu_local}${NC} 接收端 ${YELLOW}${cpu_remote}${NC}"
             fi
@@ -858,7 +864,7 @@ run_tcp_single_thread_test() {
 
             # 收集TCP上行测试数据
             set_test_result "tcp_up_speed_mbps" "$mbps"
-            set_test_result "tcp_up_speed_mibs" "$final_bitrate"
+            set_test_result "tcp_up_speed_mibs" "$mb_per_sec"
             set_test_result "tcp_up_transfer" "$final_transfer"
             set_test_result "tcp_up_retrans" "$final_retrans"
             if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
@@ -868,8 +874,12 @@ run_tcp_single_thread_test() {
             fi
 
             # 保存TCP Mbps值，四舍五入到10的倍数，用于UDP的-b参数
-            local tcp_mbps_raw=$(awk "BEGIN {printf \"%.0f\", $final_bitrate * 8}")
-            TCP_MBPS=$(awk "BEGIN {printf \"%.0f\", int(($tcp_mbps_raw + 5) / 10) * 10}")
+            if [ "$mbps" != "N/A" ]; then
+                # 复用已计算的mbps值，避免重复计算
+                TCP_MBPS=$(awk "BEGIN {printf \"%.0f\", int(($mbps + 5) / 10) * 10}")
+            else
+                TCP_MBPS=100  # 默认值
+            fi
             TCP_SINGLE_SUCCESS=true
         else
             echo -e "${RED}❌ 无法解析测试结果${NC}"
@@ -884,12 +894,12 @@ run_tcp_single_thread_test() {
     echo ""
 }
 
-# 执行带宽测试
+# 带宽测试
 run_bandwidth_tests() {
     echo -e "${YELLOW}🟢 网络带宽性能测试${NC}"
     echo ""
 
-    # 检查iperf3工具
+    # 检查工具
     if ! check_tool "iperf3"; then
         echo -e "${YELLOW}⚠️  iperf3工具不可用，跳过带宽测试${NC}"
         TCP_SUCCESS=false
@@ -898,7 +908,7 @@ run_bandwidth_tests() {
         return
     fi
 
-    # 检查连通性
+    # 连通性检查
     if ! nc -z -w3 "$TARGET_IP" "$TARGET_PORT" >/dev/null 2>&1; then
         echo -e "  ${RED}无法连接到目标服务器${NC}"
         echo -e "  ${YELLOW}请确认目标服务器运行: iperf3 -s -p $TARGET_PORT${NC}"
@@ -913,29 +923,29 @@ run_bandwidth_tests() {
     iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t 1 -f m >/dev/null 2>&1 || true
     sleep 1
 
-    # 执行TCP上行测试
+    # TCP上行
     run_tcp_single_thread_test
 
     echo ""
     sleep 2
 
-    # 执行UDP上行测试
+    # UDP上行
     run_udp_single_test
 
     echo ""
     sleep 2
 
-    # 执行TCP下行测试
+    # TCP下行
     run_tcp_download_test
 
     echo ""
     sleep 2
 
-    # 执行UDP下行测试
+    # UDP下行
     run_udp_download_test
 }
 
-# 执行UDP上行测试
+# UDP上行测试
 run_udp_single_test() {
     echo -e "${GREEN}🚀 UDP上行性能测试 - 目标: ${TARGET_IP}:${TARGET_PORT}${NC}"
     echo ""
@@ -992,13 +1002,18 @@ run_udp_single_test() {
                 local jitter=$(parse_iperf3_data "$receiver_line" "jitter")
                 local loss_info=$(parse_iperf3_data "$receiver_line" "loss")
 
-                # 计算有效吞吐量 (接收端数据)，MB/s直接使用MBytes/sec值
-                local recv_mbps=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate * 8}")
+                # receiver_bitrate现在是Mbits/sec的数值
+                local recv_mbps="N/A"
+                local recv_mb_per_sec="N/A"
+                if [ -n "$receiver_bitrate" ] && [[ "$receiver_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                    recv_mbps=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate}")  # 直接使用Mbits/sec值
+                    recv_mb_per_sec=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate / 8}")  # 转换为MB/s
+                fi
 
                 # 计算目标速率显示（与-b参数一致）
                 local target_mbps=$(echo "$udp_bandwidth" | sed 's/M$//')
 
-                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps:-N/A} Mbps${NC} (${YELLOW}${receiver_bitrate:-N/A} MB/s${NC})"
+                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps} Mbps${NC} (${YELLOW}${recv_mb_per_sec} MB/s${NC})"
                 echo -e "丢包率 (Packet Loss): ${YELLOW}${loss_info:-N/A}${NC}"
                 echo -e "网络抖动 (Jitter): ${YELLOW}${jitter:-N/A} ms${NC}"
 
@@ -1011,7 +1026,7 @@ run_udp_single_test() {
 
                 # 收集UDP上行测试数据
                 set_test_result "udp_up_speed_mbps" "$recv_mbps"
-                set_test_result "udp_up_speed_mibs" "$receiver_bitrate"
+                set_test_result "udp_up_speed_mibs" "$recv_mb_per_sec"
                 set_test_result "udp_up_loss" "$loss_info"
                 set_test_result "udp_up_jitter" "$jitter"
             else
@@ -1088,10 +1103,15 @@ run_tcp_download_test() {
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
 
-            # 计算Mbps，MB/s直接使用MBytes/sec值
-            local mbps=$(awk "BEGIN {printf \"%.0f\", $final_bitrate * 8}")
+            # final_bitrate现在是Mbits/sec的数值
+            local mbps="N/A"
+            local mb_per_sec="N/A"
+            if [ -n "$final_bitrate" ] && [[ "$final_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                mbps=$(awk "BEGIN {printf \"%.0f\", $final_bitrate}")  # 直接使用Mbits/sec值
+                mb_per_sec=$(awk "BEGIN {printf \"%.1f\", $final_bitrate / 8}")  # 转换为MB/s
+            fi
 
-            echo -e "平均下行速率 (Receiver): ${YELLOW}${mbps:-N/A} Mbps${NC} (${YELLOW}${final_bitrate:-N/A} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
+            echo -e "平均下行速率 (Receiver): ${YELLOW}${mbps} Mbps${NC} (${YELLOW}${mb_per_sec} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
 
             # 获取TCP拥塞控制算法
             local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
@@ -1117,7 +1137,7 @@ run_tcp_download_test() {
 
             # 收集TCP下行测试数据
             set_test_result "tcp_down_speed_mbps" "$mbps"
-            set_test_result "tcp_down_speed_mibs" "$final_bitrate"
+            set_test_result "tcp_down_speed_mibs" "$mb_per_sec"
             set_test_result "tcp_down_transfer" "$final_transfer"
             set_test_result "tcp_down_retrans" "$final_retrans"
 
@@ -1129,8 +1149,12 @@ run_tcp_download_test() {
             fi
 
             # 保存TCP下行Mbps值，四舍五入到10的倍数，用于UDP下行的-b参数
-            local tcp_download_mbps_raw=$(awk "BEGIN {printf \"%.0f\", $final_bitrate * 8}")
-            TCP_DOWNLOAD_MBPS=$(awk "BEGIN {printf \"%.0f\", int(($tcp_download_mbps_raw + 5) / 10) * 10}")
+            if [ "$mbps" != "N/A" ]; then
+                # 复用已计算的mbps值，避免重复计算
+                TCP_DOWNLOAD_MBPS=$(awk "BEGIN {printf \"%.0f\", int(($mbps + 5) / 10) * 10}")
+            else
+                TCP_DOWNLOAD_MBPS=100  # 默认值
+            fi
             TCP_DOWNLOAD_SUCCESS=true
         else
             echo -e "${RED}❌ 无法解析测试结果${NC}"
@@ -1201,13 +1225,18 @@ run_udp_download_test() {
                 local jitter=$(parse_iperf3_data "$receiver_line" "jitter")
                 local loss_info=$(parse_iperf3_data "$receiver_line" "loss")
 
-                # 计算有效吞吐量 (接收端数据)，MB/s直接使用MBytes/sec值
-                local recv_mbps=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate * 8}")
+                # receiver_bitrate现在是Mbits/sec的数值
+                local recv_mbps="N/A"
+                local recv_mb_per_sec="N/A"
+                if [ -n "$receiver_bitrate" ] && [[ "$receiver_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                    recv_mbps=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate}")  # 直接使用Mbits/sec值
+                    recv_mb_per_sec=$(awk "BEGIN {printf \"%.1f\", $receiver_bitrate / 8}")  # 转换为MB/s
+                fi
 
                 # 计算目标速率显示（与-b参数一致）
                 local target_mbps=$(echo "$udp_bandwidth" | sed 's/M$//')
 
-                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps:-N/A} Mbps${NC} (${YELLOW}${receiver_bitrate:-N/A} MB/s${NC})"
+                echo -e "有效吞吐量 (吞吐率): ${YELLOW}${recv_mbps} Mbps${NC} (${YELLOW}${recv_mb_per_sec} MB/s${NC})"
                 echo -e "丢包率 (Packet Loss): ${YELLOW}${loss_info:-N/A}${NC}"
                 echo -e "网络抖动 (Jitter): ${YELLOW}${jitter:-N/A} ms${NC}"
 
@@ -1220,7 +1249,7 @@ run_udp_download_test() {
 
                 # 收集UDP下行测试数据
                 set_test_result "udp_down_speed_mbps" "$recv_mbps"
-                set_test_result "udp_down_speed_mibs" "$receiver_bitrate"
+                set_test_result "udp_down_speed_mibs" "$recv_mb_per_sec"
                 set_test_result "udp_down_loss" "$loss_info"
                 set_test_result "udp_down_jitter" "$jitter"
             else
