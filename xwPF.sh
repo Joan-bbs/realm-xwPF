@@ -172,7 +172,7 @@ check_dependencies() {
     if [ ${#missing_tools[@]} -gt 0 ]; then
         echo -e "${RED}错误: 缺少必备工具: ${missing_tools[*]}${NC}"
         echo -e "${YELLOW}请先选择菜单选项1进行安装，或手动运行安装命令:${NC}"
-        echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh | sudo bash -s install${NC}"
+        echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
         exit 1
     fi
 }
@@ -1934,11 +1934,17 @@ check_mptcp_support() {
     fi
 }
 
-# 尝试启用MPTCP（配置生效）
+# 启用MPTCP功能
 enable_mptcp() {
-    echo -e "${BLUE}正在尝试保存配置启用MPTCP...${NC}"
+    echo -e "${BLUE}正在启用MPTCP并进行配置...${NC}"
+    echo ""
+
+    # 检查并升级iproute2包
+    echo -e "${YELLOW}步骤1: 检查并升级iproute2包...${NC}"
+    upgrade_iproute2_for_mptcp
 
     # 创建sysctl配置文件启用MPTCP
+    echo -e "${YELLOW}步骤2: 启用系统MPTCP...${NC}"
     local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
 
     if echo "net.mptcp.enabled=1" > "$mptcp_conf" 2>/dev/null; then
@@ -1947,8 +1953,6 @@ enable_mptcp() {
         # 立即应用配置
         if sysctl -p "$mptcp_conf" >/dev/null 2>&1; then
             echo -e "${GREEN}✓ MPTCP已成功启用并保存生效${NC}"
-            echo -e "${BLUE}配置将在重启后自动加载${NC}"
-            return 0
         else
             echo -e "${YELLOW}配置文件已创建，但立即应用失败${NC}"
             echo -e "${YELLOW}请手动执行: sysctl -p $mptcp_conf${NC}"
@@ -1956,37 +1960,100 @@ enable_mptcp() {
         fi
     else
         echo -e "${RED}错误: 无法创建MPTCP配置文件${NC}"
-        echo -e "${YELLOW}请手动执行以下命令：${NC}"
-        echo -e "${BLUE}echo 'net.mptcp.enabled=1' > $mptcp_conf${NC}"
-        echo -e "${BLUE}sysctl -p $mptcp_conf${NC}"
+        return 1
+    fi
+
+    # 设置MPTCP连接限制
+    echo -e "${YELLOW}步骤3: 设置MPTCP连接限制...${NC}"
+    if /usr/bin/ip mptcp limits set subflows 8 add_addr_accepted 8 2>/dev/null; then
+        echo -e "${GREEN}✓ MPTCP连接限制已设置为最大值 (subflows=8, add_addr_accepted=8)${NC}"
+    else
+        echo -e "${YELLOW}⚠ 无法设置MPTCP连接限制，使用默认值 (subflows=2, add_addr_accepted=0)${NC}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}✓ MPTCP基础配置完成！${NC}"
+    echo -e "${BLUE}配置将自动加载${NC}"
+    return 0
+}
+
+# 检查并升级iproute2包
+upgrade_iproute2_for_mptcp() {
+    # 获取当前版本
+    local current_version=$(/usr/bin/ip -V 2>/dev/null | grep -oP 'iproute2-\K[^,\s]+' || echo "unknown")
+    echo -e "${BLUE}当前iproute2版本: $current_version${NC}"
+
+    # 检查MPTCP功能支持
+    local mptcp_help_output=$(/usr/bin/ip mptcp help 2>&1)
+    if echo "$mptcp_help_output" | grep -q "endpoint\|limits"; then
+        echo -e "${GREEN}✓ 当前版本已支持MPTCP${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}当前版本不支持MPTCP，开始升级...${NC}"
+
+    # 使用包管理器升级
+    echo -e "${BLUE}正在使用包管理器升级...${NC}"
+    local apt_output
+    apt_output=$(apt update 2>&1 && apt install -y iproute2 2>&1)
+
+    # 检查升级结果
+    local mptcp_help_output=$(/usr/bin/ip mptcp help 2>&1)
+    if [ $? -eq 0 ] && echo "$mptcp_help_output" | grep -q "endpoint\|limits"; then
+        echo -e "${GREEN}✓ 升级成功，MPTCP现在可用${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠ 升级后仍不支持MPTCP${NC}"
+        echo -e "${YELLOW}当前系统版本过低，请尝试手动更新iproute2${NC}"
         return 1
     fi
 }
 
-# 禁用MPTCP（配置生效）
+# 禁用MPTCP功能
 disable_mptcp() {
-    echo -e "${BLUE}正在禁用MPTCP...${NC}"
+    echo -e "${BLUE}正在禁用MPTCP并清理配置...${NC}"
+    echo ""
 
-    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
+    # 清理MPTCP端点
+    echo -e "${YELLOW}步骤1: 清理MPTCP端点...${NC}"
+    if /usr/bin/ip mptcp endpoint show >/dev/null 2>&1; then
+        local endpoints_output=$(/usr/bin/ip mptcp endpoint show 2>/dev/null)
+        if [ -n "$endpoints_output" ]; then
+            # 清理所有端点
+            /usr/bin/ip mptcp endpoint flush 2>/dev/null
+            echo -e "${GREEN}✓ 已清理所有MPTCP端点${NC}"
+        else
+            echo -e "${BLUE}  无MPTCP端点需要清理${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠ ip mptcp命令不可用，跳过端点清理${NC}"
+    fi
 
-    # 立即禁用MPTCP
+    # 禁用系统MPTCP
+    echo -e "${YELLOW}步骤2: 禁用系统MPTCP...${NC}"
     if echo 0 > /proc/sys/net/mptcp/enabled 2>/dev/null; then
         echo -e "${GREEN}✓ MPTCP已立即禁用${NC}"
     else
         echo -e "${YELLOW}立即禁用MPTCP失败，但将删除配置文件${NC}"
     fi
 
-    # 删除配置文件以防止重启后自动启用
+    # 删除配置文件
+    echo -e "${YELLOW}步骤3: 删除配置文件...${NC}"
+    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
     if [ -f "$mptcp_conf" ]; then
         if rm -f "$mptcp_conf" 2>/dev/null; then
             echo -e "${GREEN}✓ MPTCP配置文件已删除${NC}"
-            echo -e "${BLUE}重启后MPTCP将保持禁用状态${NC}"
         else
             echo -e "${YELLOW}无法删除配置文件: $mptcp_conf${NC}"
             echo -e "${YELLOW}请手动删除以防止重启后自动启用${NC}"
         fi
+    else
+        echo -e "${BLUE}  无配置文件需要删除${NC}"
     fi
 
+    echo ""
+    echo -e "${GREEN}✓ MPTCP已完全禁用！${NC}"
+    echo -e "${BLUE}重启后MPTCP将保持禁用状态,恢复TCP${NC}"
     return 0
 }
 
@@ -2032,6 +2099,99 @@ get_mptcp_mode_color() {
             echo "${WHITE}"
             ;;
     esac
+}
+
+# 获取网络接口详细信息
+get_network_interfaces_detailed() {
+    local interfaces_info=""
+
+    # 获取所有网络接口
+    for interface in $(ip link show | grep -E '^[0-9]+:' | cut -d: -f2 | tr -d ' ' | grep -v lo); do
+        local ipv4_info=""
+        local ipv6_info=""
+
+        # 获取IPv4地址
+        local ipv4_addrs=$(ip -4 addr show "$interface" 2>/dev/null | grep -oP 'inet \K[^/]+/[0-9]+' | head -1)
+        if [ -n "$ipv4_addrs" ]; then
+            ipv4_info="$ipv4_addrs (IPv4)"
+        else
+            ipv4_info="未配置IPv4"
+        fi
+
+        # 获取IPv6地址（排除链路本地地址）
+        local ipv6_addrs=$(ip -6 addr show "$interface" 2>/dev/null | grep -oP 'inet6 \K[^/]+/[0-9]+' | grep -v '^fe80:' | head -1)
+        if [ -n "$ipv6_addrs" ]; then
+            ipv6_info="$ipv6_addrs (IPv6)"
+        else
+            ipv6_info="未配置IPv6"
+        fi
+
+        # 检查是否为VLAN接口
+        local vlan_info=""
+        if [[ "$interface" == *"."* ]]; then
+            vlan_info=" (VLAN)"
+        fi
+
+        interfaces_info="${interfaces_info}  网卡 $interface: $ipv4_info | $ipv6_info$vlan_info\n"
+    done
+
+    echo -e "$interfaces_info"
+}
+
+# 获取MPTCP端点配置状态
+get_mptcp_endpoints_status() {
+    local endpoints_output=$(/usr/bin/ip mptcp endpoint show 2>/dev/null)
+    local endpoint_count=0
+    local endpoints_info=""
+
+    if [ -n "$endpoints_output" ]; then
+        while IFS= read -r line; do
+            if [ -n "$line" ]; then
+                endpoint_count=$((endpoint_count + 1))
+                # 解析端点信息
+                local id=$(echo "$line" | grep -oP 'id \K[0-9]+' || echo "")
+                local addr=$(echo "$line" | grep -oP '^[^ ]+' || echo "")
+                local dev=$(echo "$line" | grep -oP 'dev \K[^ ]+' || echo "")
+                local flags=$(echo "$line" | grep -oP '\[(.*?)\]' || echo "[signal]")
+
+                if [ -n "$addr" ]; then
+                    endpoints_info="${endpoints_info}  ID $id: $addr dev $dev $flags\n"
+                fi
+            fi
+        done <<< "$endpoints_output"
+    fi
+
+    echo -e "${BLUE}MPTCP端点配置:${NC}"
+    if [ $endpoint_count -gt 0 ]; then
+        echo -e "$endpoints_info"
+    else
+        echo -e "  ${YELLOW}暂无MPTCP端点配置${NC}"
+    fi
+
+    return $endpoint_count
+}
+
+# 统计MPTCP连接数量
+get_mptcp_connections_stats() {
+    local ss_output=$(ss -M 2>/dev/null)
+    local mptcp_connections=0
+    local subflows=0
+
+    if [ -n "$ss_output" ]; then
+        # 统计已建立的连接数 (grep -c 总是返回数字，包括0)
+        mptcp_connections=$(echo "$ss_output" | grep -c ESTAB 2>/dev/null)
+
+        # 统计子流数量 (总行数减1，最少为0)
+        local total_lines=$(echo "$ss_output" | wc -l)
+        subflows=$(( total_lines > 1 ? total_lines - 1 : 0 ))
+    fi
+
+    # 输出统计结果
+    if [ "$mptcp_connections" -eq 0 ] && [ "$subflows" -eq 0 ]; then
+        echo "活跃连接: 0个 | 子流: 0个 (无连接时为0正常现象)"
+    else
+        echo "活跃连接: ${mptcp_connections}个 | 子流: ${subflows}个"
+    fi
 }
 
 # MPTCP管理主菜单
@@ -2123,6 +2283,18 @@ mptcp_management_menu() {
         fi
         echo ""
 
+        # 显示网络环境状态
+        echo -e "${BLUE}网络环境状态:${NC}"
+        get_network_interfaces_detailed
+        echo ""
+
+        # 显示MPTCP端点配置和连接统计
+        get_mptcp_endpoints_status
+        local connections_stats=$(get_mptcp_connections_stats)
+        echo -e "${BLUE}MPTCP连接统计:${NC}"
+        echo -e "  $connections_stats"
+        echo ""
+
         # 显示规则列表和MPTCP状态
         if ! list_rules_for_mptcp_management; then
             echo ""
@@ -2132,12 +2304,30 @@ mptcp_management_menu() {
 
         echo ""
         echo -e "${RED}规则ID 0: 关闭系统MPTCP，回退普通TCP模式${NC}"
-        echo ""
-
+        echo -e "${BLUE}输入 add: 添加MPTCP端点 | del: 删除MPTCP端点 | look: 查看MPTCP详细状态${NC}"
         read -p "请输入要配置的规则ID(多ID使用逗号,分隔，0为关闭系统MPTCP): " rule_input
         if [ -z "$rule_input" ]; then
             return
         fi
+
+        # 处理特殊命令
+        case "$rule_input" in
+            "add")
+                add_mptcp_endpoint_interactive
+                read -p "按回车键继续..."
+                continue
+                ;;
+            "del")
+                delete_mptcp_endpoint_interactive
+                read -p "按回车键继续..."
+                continue
+                ;;
+            "look")
+                show_mptcp_detailed_status
+                read -p "按回车键继续..."
+                continue
+                ;;
+        esac
 
         # 规则ID 0的特殊处理：直接关闭系统MPTCP
         if [ "$rule_input" = "0" ]; then
@@ -2427,7 +2617,367 @@ init_mptcp_fields() {
     done
 }
 
+# 添加MPTCP端点
+add_mptcp_endpoint_interactive() {
+    echo -e "${GREEN}=== 添加MPTCP端点 ===${NC}"
+    echo ""
 
+    # 显示当前MPTCP端点
+    echo -e "${BLUE}当前MPTCP端点:${NC}"
+    get_mptcp_endpoints_status
+    echo ""
+
+    # 获取所有网络接口信息
+    local interfaces=()
+    local interface_names=()
+    local interface_count=0
+
+    # 收集网络接口信息
+    for interface in $(ip link show | grep -E '^[0-9]+:' | cut -d: -f2 | tr -d ' ' | grep -v lo); do
+        local ipv4_addrs=$(ip -4 addr show "$interface" 2>/dev/null | grep -oP 'inet \K[^/]+' | tr '\n' ' ')
+        local ipv6_addrs=$(ip -6 addr show "$interface" 2>/dev/null | grep -oP 'inet6 \K[^/]+' | grep -v '^fe80:' | tr '\n' ' ')
+
+        # 只显示有IP地址的接口
+        if [ -n "$ipv4_addrs" ] || [ -n "$ipv6_addrs" ]; then
+            interface_count=$((interface_count + 1))
+            interfaces+=("$interface")
+
+            # 构建显示信息
+            local display_info="$interface: "
+            if [ -n "$ipv4_addrs" ]; then
+                display_info="${display_info}${ipv4_addrs}(IPv4)"
+            else
+                display_info="${display_info}未配置IPv4"
+            fi
+
+            display_info="${display_info} | "
+
+            if [ -n "$ipv6_addrs" ]; then
+                display_info="${display_info}${ipv6_addrs}(IPv6)"
+            else
+                display_info="${display_info}未配置IPv6"
+            fi
+
+            interface_names+=("$display_info")
+        fi
+    done
+
+    if [ $interface_count -eq 0 ]; then
+        echo -e "${RED}未找到配置IP地址的网络接口${NC}"
+        return 1
+    fi
+
+    # 显示网络接口列表
+    echo -e "${BLUE}当前网络接口:${NC}"
+    for i in $(seq 0 $((interface_count - 1))); do
+        echo -e "${GREEN}$((i + 1)).${NC} ${interface_names[$i]}"
+    done
+    echo ""
+
+    # 选择网络接口
+    read -p "请选择网卡 [1-$interface_count]: " interface_choice
+    if [[ ! "$interface_choice" =~ ^[0-9]+$ ]] || [ "$interface_choice" -lt 1 ] || [ "$interface_choice" -gt $interface_count ]; then
+        echo -e "${RED}无效的选择${NC}"
+        return 1
+    fi
+
+    local selected_interface="${interfaces[$((interface_choice - 1))]}"
+    echo -e "${BLUE}已选择网卡: $selected_interface${NC}"
+    echo ""
+
+    # 获取选中网卡的IP地址列表
+    local selected_ips=()
+    local ip_display=()
+    local ip_count=0
+
+    # 获取IPv4地址
+    local ipv4_list=$(ip -4 addr show "$selected_interface" 2>/dev/null | grep -oP 'inet \K[^/]+')
+    if [ -n "$ipv4_list" ]; then
+        while IFS= read -r ip; do
+            if [ -n "$ip" ]; then
+                ip_count=$((ip_count + 1))
+                selected_ips+=("$ip")
+                ip_display+=("$ip (IPv4)")
+            fi
+        done <<< "$ipv4_list"
+    fi
+
+    # 获取IPv6地址
+    local ipv6_list=$(ip -6 addr show "$selected_interface" 2>/dev/null | grep -oP 'inet6 \K[^/]+' | grep -v '^fe80:')
+    if [ -n "$ipv6_list" ]; then
+        while IFS= read -r ip; do
+            if [ -n "$ip" ]; then
+                ip_count=$((ip_count + 1))
+                selected_ips+=("$ip")
+                ip_display+=("$ip (IPv6)")
+            fi
+        done <<< "$ipv6_list"
+    fi
+
+    if [ $ip_count -eq 0 ]; then
+        echo -e "${RED}选中的网卡没有可用的IP地址${NC}"
+        return 1
+    fi
+
+    # 显示IP地址列表
+    echo -e "${BLUE}${selected_interface} 的可用IP地址:${NC}"
+    for i in $(seq 0 $((ip_count - 1))); do
+        echo -e "${GREEN}$((i + 1)).${NC} ${ip_display[$i]}"
+    done
+    echo ""
+
+    # 选择IP地址
+    read -p "请选择IP地址(回车默认全选): " ip_choice
+
+    local selected_ip_list=()
+    if [ -z "$ip_choice" ]; then
+        # 默认全选
+        selected_ip_list=("${selected_ips[@]}")
+        echo -e "${BLUE}已选择全部IP地址${NC}"
+    else
+        if [[ ! "$ip_choice" =~ ^[0-9]+$ ]] || [ "$ip_choice" -lt 1 ] || [ "$ip_choice" -gt $ip_count ]; then
+            echo -e "${RED}无效的选择${NC}"
+            return 1
+        fi
+        selected_ip_list=("${selected_ips[$((ip_choice - 1))]}")
+        echo -e "${BLUE}已选择IP地址: ${selected_ips[$((ip_choice - 1))]}${NC}"
+    fi
+    echo ""
+
+    # 选择端点类型
+    echo ""
+    echo -e "${BLUE}请选择MPTCP端点类型:${NC}"
+    echo ""
+    echo -e "${YELLOW}建议:${NC}"
+    echo -e "  • 中转机/客户端: 选择 subflow"
+    echo -e "  • 落地机/服务端: 选择 signal"
+    echo ""
+    echo -e "${GREEN}1.${NC} subflow (客户端模式 - 主动创建连接)"
+    echo -e "${BLUE}2.${NC} signal (服务端模式 - 通告地址给客户端)"
+    echo -e "${YELLOW}3.${NC} fullmesh (全网格模式 - 与所有对端建立连接)"
+    echo ""
+
+    read -p "请选择端点类型 [1-3]: " type_choice
+
+    local endpoint_type
+    local type_description
+    case "$type_choice" in
+        "1")
+            endpoint_type="subflow"
+            type_description="subflow (客户端模式)"
+            ;;
+        "2")
+            endpoint_type="signal"
+            type_description="signal (服务端模式)"
+            ;;
+        "3")
+            endpoint_type="subflow fullmesh"
+            type_description="subflow fullmesh (全网格模式)"
+            ;;
+        *)
+            echo -e "${RED}无效的选择，默认使用subflow模式${NC}"
+            endpoint_type="subflow"
+            type_description="subflow (客户端模式)"
+            ;;
+    esac
+
+    # 自动设置连接限制为最大值
+    echo -e "${YELLOW}正在设置MPTCP连接限制为最大值...${NC}"
+    /usr/bin/ip mptcp limits set subflows 8 add_addr_accepted 8 2>/dev/null
+
+    # 批量添加MPTCP端点
+    echo -e "${YELLOW}正在添加MPTCP端点...${NC}"
+    local success_count=0
+    local total_count=${#selected_ip_list[@]}
+
+    for ip_address in "${selected_ip_list[@]}"; do
+        echo -e "${BLUE}执行命令: /usr/bin/ip mptcp endpoint add $ip_address dev $selected_interface $endpoint_type${NC}"
+
+        local error_output
+        error_output=$(/usr/bin/ip mptcp endpoint add "$ip_address" dev "$selected_interface" $endpoint_type 2>&1)
+        local exit_code=$?
+
+        if [ $exit_code -eq 0 ]; then
+            echo -e "${GREEN}✓ MPTCP端点添加成功: $ip_address${NC}"
+            success_count=$((success_count + 1))
+        else
+            echo -e "${RED}✗ MPTCP端点添加失败: $ip_address${NC}"
+            echo -e "${RED}错误信息: $error_output${NC}"
+        fi
+    done
+
+    echo ""
+    echo -e "${BLUE}添加结果: 成功 $success_count/$total_count${NC}"
+    echo -e "${BLUE}网络接口: $selected_interface${NC}"
+    echo -e "${BLUE}端点模式: $type_description${NC}"
+
+    if [ $success_count -gt 0 ]; then
+        # 显示更新后的端点列表
+        echo ""
+        echo -e "${BLUE}更新后的MPTCP端点:${NC}"
+        get_mptcp_endpoints_status
+    else
+        echo -e "${YELLOW}可能的原因:${NC}"
+        echo -e "  • iproute2版本不支持MPTCP"
+        echo -e "  • IP地址已存在"
+        echo -e "  • 网络接口配置问题"
+        echo -e "  • 权限不足"
+        echo ""
+        echo -e "${BLUE}调试信息:${NC}"
+        echo -e "  • 检查iproute2版本: ip -V"
+        echo -e "  • 检查MPTCP支持: ip mptcp help"
+        echo -e "  • 检查当前端点: ip mptcp endpoint show"
+        return 1
+    fi
+}
+
+# 删除MPTCP端点
+delete_mptcp_endpoint_interactive() {
+    echo -e "${GREEN}=== 删除MPTCP端点 ===${NC}"
+    echo ""
+
+    # 显示当前MPTCP端点
+    echo -e "${BLUE}当前MPTCP端点:${NC}"
+    local endpoints_output=$(/usr/bin/ip mptcp endpoint show 2>/dev/null)
+
+    if [ -z "$endpoints_output" ]; then
+        echo -e "${YELLOW}暂无MPTCP端点配置${NC}"
+        return 0
+    fi
+
+    local endpoint_count=0
+    local endpoints_list=()
+
+    while IFS= read -r line; do
+        if [ -n "$line" ]; then
+            endpoint_count=$((endpoint_count + 1))
+            endpoints_list+=("$line")
+
+            # 解析端点信息
+            local id=$(echo "$line" | grep -oP 'id \K[0-9]+' || echo "")
+            local addr=$(echo "$line" | grep -oP '^[^ ]+' || echo "")
+            local dev=$(echo "$line" | grep -oP 'dev \K[^ ]+' || echo "")
+            local flags=$(echo "$line" | grep -oP '\[(.*?)\]' || echo "[signal]")
+
+            echo -e "  ${endpoint_count}. ID $id: $addr dev $dev $flags"
+        fi
+    done <<< "$endpoints_output"
+
+    if [ $endpoint_count -eq 0 ]; then
+        echo -e "${YELLOW}暂无MPTCP端点配置${NC}"
+        return 0
+    fi
+
+    echo ""
+    read -p "请选择要删除的端点编号 [1-$endpoint_count]: " choice
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt $endpoint_count ]; then
+        echo -e "${RED}无效的选择${NC}"
+        return 1
+    fi
+
+    # 获取选中的端点信息
+    local selected_line="${endpoints_list[$((choice-1))]}"
+    local endpoint_id=$(echo "$selected_line" | grep -oP 'id \K[0-9]+' || echo "")
+    local endpoint_addr=$(echo "$selected_line" | grep -oP '^[^ ]+' || echo "")
+
+    echo ""
+    echo -e "${YELLOW}确认删除MPTCP端点:${NC}"
+    echo -e "  ID: $endpoint_id"
+    echo -e "  地址: $endpoint_addr"
+    read -p "继续删除? [y/N]: " confirm
+
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}正在删除MPTCP端点...${NC}"
+        if /usr/bin/ip mptcp endpoint delete id "$endpoint_id" 2>/dev/null; then
+            echo -e "${GREEN}✓ MPTCP端点删除成功${NC}"
+
+            # 显示更新后的端点列表
+            echo ""
+            echo -e "${BLUE}更新后的MPTCP端点:${NC}"
+            get_mptcp_endpoints_status
+        else
+            echo -e "${RED}✗ MPTCP端点删除失败${NC}"
+            return 1
+        fi
+    else
+        echo -e "${BLUE}已取消删除操作${NC}"
+    fi
+}
+
+# 显示MPTCP详细状态信息
+show_mptcp_detailed_status() {
+    echo -e "${GREEN}=== MPTCP详细状态 ===${NC}"
+    echo ""
+
+    # 系统MPTCP状态
+    echo -e "${BLUE}系统MPTCP状态:${NC}"
+    local mptcp_enabled=$(cat /proc/sys/net/mptcp/enabled 2>/dev/null || echo "0")
+    if [ "$mptcp_enabled" = "1" ]; then
+        echo -e "  ✓ MPTCP已启用 (net.mptcp.enabled=$mptcp_enabled)"
+    else
+        echo -e "  ✗ MPTCP未启用 (net.mptcp.enabled=$mptcp_enabled)"
+    fi
+    echo ""
+
+    # MPTCP连接限制
+    echo -e "${BLUE}MPTCP连接限制:${NC}"
+    local limits_output=$(/usr/bin/ip mptcp limits show 2>/dev/null)
+    if [ -n "$limits_output" ]; then
+        echo "  $limits_output"
+    else
+        echo -e "  ${YELLOW}无法获取连接限制信息${NC}"
+    fi
+    echo ""
+
+    # 网络接口状态
+    echo -e "${BLUE}网络接口状态:${NC}"
+    get_network_interfaces_detailed
+    echo ""
+
+    # MPTCP端点配置
+    get_mptcp_endpoints_status
+    echo ""
+
+    # MPTCP连接统计
+    echo -e "${BLUE}MPTCP连接统计:${NC}"
+    local connections_stats=$(get_mptcp_connections_stats)
+    echo -e "  $connections_stats"
+    echo ""
+
+    # 活跃MPTCP连接详情
+    echo -e "${BLUE}活跃MPTCP连接详情:${NC}"
+    local mptcp_connections=$(ss -M 2>/dev/null)
+    if [ -n "$mptcp_connections" ] && [ "$(echo "$mptcp_connections" | wc -l)" -gt 1 ]; then
+        echo "$mptcp_connections"
+    else
+        echo -e "  ${YELLOW}暂无活跃MPTCP连接${NC}"
+    fi
+}
+
+# 验证IP地址格式
+validate_ip_address() {
+    local ip="$1"
+
+    # IPv4地址验证
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        local IFS='.'
+        local -a octets=($ip)
+        for octet in "${octets[@]}"; do
+            if [ "$octet" -gt 255 ]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+
+    # IPv6地址验证
+    if [[ $ip =~ ^[0-9a-fA-F:]+$ ]] && [[ $ip == *":"* ]]; then
+        return 0
+    fi
+
+    return 1
+}
 
 #--- Proxy管理功能 ---
 
@@ -4623,8 +5173,8 @@ get_latest_realm_version() {
 
     # 如果失败，使用硬编码版本号
     if [ -z "$latest_version" ]; then
-        echo -e "${YELLOW}使用当前最新版本 v2.9.0${NC}" >&2
-        latest_version="v2.9.0"
+        echo -e "${YELLOW}使用当前最新版本 v2.9.1${NC}" >&2
+        latest_version="v2.9.1"
     fi
 
     echo -e "${GREEN}✓ 检测到最新版本: ${latest_version}${NC}" >&2
@@ -5807,13 +6357,13 @@ self_install() {
 
         # 自动从GitHub下载最新版本覆盖更新
         echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
-        local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
+        local base_script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh"
 
         # 使用统一多源下载函数
         if download_from_sources "$base_script_url" "${install_dir}/${script_name}" 30 10; then
             chmod +x "${install_dir}/${script_name}"
         else
-            echo -e "${RED}✗ 脚本更新失败${NC}"
+            echo -e "${RED}✗ 脚本更新失败，手动更新wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
             echo -e "${BLUE}使用现有脚本版本${NC}"
         fi
     elif [ -f "$0" ]; then
@@ -5824,7 +6374,7 @@ self_install() {
     else
         # 如果是通过管道运行的，需要重新下载
         echo -e "${BLUE}正在从GitHub下载脚本...${NC}"
-        local base_script_url="https://raw.githubusercontent.com/zywe03/PortEasy/main/xwPF.sh"
+        local base_script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh"
 
         # 使用统一多源下载函数
         if download_from_sources "$base_script_url" "${install_dir}/${script_name}" 30 10; then
