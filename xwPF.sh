@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.5.0"
+SCRIPT_VERSION="v1.6.0"
 
 # 全局变量声明
 ROLE=""
@@ -1613,10 +1613,19 @@ import_config_package() {
                 # 解析端点信息：IP地址 id 数字 类型 dev 接口名
                 local addr=$(echo "$line" | awk '{print $1}')
                 local dev=$(echo "$line" | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
-                local flags=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="subflow" || $i=="signal" || $i=="fullmesh") print $i}')
+
+                # 解析三种端点模式
+                local flags=""
+                if echo "$line" | grep -q "subflow.*fullmesh"; then
+                    flags="subflow fullmesh"
+                elif echo "$line" | grep -q "subflow.*backup"; then
+                    flags="subflow backup"
+                elif echo "$line" | grep -q "signal"; then
+                    flags="signal"
+                fi
 
                 if [ -n "$addr" ] && [ -n "$dev" ] && [ -n "$flags" ]; then
-                    /usr/bin/ip mptcp endpoint add "$addr" dev "$dev" "$flags" 2>/dev/null
+                    /usr/bin/ip mptcp endpoint add "$addr" dev "$dev" $flags 2>/dev/null
                 fi
             fi
         done < "${config_dir}/mptcp_endpoints.conf"
@@ -1971,7 +1980,20 @@ enable_mptcp() {
     echo -e "${YELLOW}步骤2: 启用系统MPTCP...${NC}"
     local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
 
-    if echo "net.mptcp.enabled=1" > "$mptcp_conf" 2>/dev/null; then
+    # 创建完整的MPTCP配置文件
+    cat > "$mptcp_conf" << EOF
+# MPTCP基础配置
+net.mptcp.enabled=1
+
+# 强制使用内核路径管理器
+net.mptcp.pm_type=0
+
+# 优化反向路径过滤
+net.ipv4.conf.all.rp_filter=2
+net.ipv4.conf.default.rp_filter=2
+EOF
+
+    if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ MPTCP配置文件已创建: $mptcp_conf${NC}"
 
         # 立即应用配置
@@ -1987,8 +2009,30 @@ enable_mptcp() {
         return 1
     fi
 
+    # 优化MPTCP系统参数
+    echo -e "${YELLOW}步骤3: 优化MPTCP系统参数...${NC}"
+
+    # 强制使用内核路径管理器
+    if sysctl -w net.mptcp.pm_type=0 >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ 已切换到内核路径管理器${NC}"
+    else
+        echo -e "${YELLOW}⚠ 无法设置路径管理器类型${NC}"
+    fi
+
+    # 停止可能冲突的mptcpd服务
+    if systemctl is-active mptcpd >/dev/null 2>&1; then
+        echo -e "${YELLOW}检测到mptcpd服务，正在停止...${NC}"
+        systemctl stop mptcpd 2>/dev/null || true
+        systemctl disable mptcpd 2>/dev/null || true
+        echo -e "${GREEN}✓ 已停止mptcpd服务${NC}"
+    fi
+
+    # 设置反向路径过滤（关键优化）
+    sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null 2>&1
+    sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null 2>&1
+    echo -e "${GREEN}✓ 已优化反向路径过滤设置${NC}"
+
     # 设置MPTCP连接限制
-    echo -e "${YELLOW}步骤3: 设置MPTCP连接限制...${NC}"
     if /usr/bin/ip mptcp limits set subflows 8 add_addr_accepted 8 2>/dev/null; then
         echo -e "${GREEN}✓ MPTCP连接限制已设置为最大值 (subflows=8, add_addr_accepted=8)${NC}"
     else
@@ -2176,7 +2220,17 @@ get_mptcp_endpoints_status() {
                 local id=$(echo "$line" | grep -oP 'id \K[0-9]+' || echo "")
                 local addr=$(echo "$line" | grep -oP '^[^ ]+' || echo "")
                 local dev=$(echo "$line" | grep -oP 'dev \K[^ ]+' || echo "")
-                local flags=$(echo "$line" | grep -oP '\[(.*?)\]' || echo "[signal]")
+                # 解析MPTCP端点类型：脚本支持的三种模式
+                local flags=""
+                if echo "$line" | grep -q "subflow.*fullmesh"; then
+                    flags="[subflow fullmesh]"
+                elif echo "$line" | grep -q "subflow.*backup"; then
+                    flags="[subflow backup]"
+                elif echo "$line" | grep -q "signal"; then
+                    flags="[signal]"
+                else
+                    flags="[unknown]"
+                fi
 
                 if [ -n "$addr" ]; then
                     endpoints_info="${endpoints_info}  ID $id: $addr dev $dev $flags\n"
@@ -2296,6 +2350,9 @@ mptcp_management_menu() {
                             echo -e "${YELLOW}配置文件已保存，但立即应用失败${NC}"
                             echo -e "${BLUE}手动应用配置: sysctl -p $config_file${NC}"
                         fi
+                        echo ""
+                        read -p "按回车键刷新状态显示..."
+                        continue  # 重新开始循环，刷新状态显示
                     else
                         echo -e "${RED}✗ 保存MPTCP配置失败${NC}"
                         echo -e "${YELLOW}请手动执行: echo 'net.mptcp.enabled=1' > $config_file${NC}"
@@ -2773,42 +2830,42 @@ add_mptcp_endpoint_interactive() {
     echo -e "${BLUE}请选择MPTCP端点类型:${NC}"
     echo ""
     echo -e "${YELLOW}建议:${NC}"
-    echo -e "  • 中转机/客户端: 选择 subflow"
-    echo -e "  • 落地机/服务端: 选择 signal"
+    echo -e "  • 中转机/客户端: 选择 subflow fullmesh"
+    echo -e "  • 落地机/服务端: 选择 signal (可选)"
+    echo -e "  • 备用路径: 选择 subflow backup (仅在主路径故障时使用)"
     echo ""
-    echo -e "${GREEN}1.${NC} subflow (客户端模式 - 主动创建连接)"
+    echo -e "${GREEN}1.${NC} subflow fullmesh (客户端模式 - 全网格连接)"
     echo -e "${BLUE}2.${NC} signal (服务端模式 - 通告地址给客户端)"
-    echo -e "${YELLOW}3.${NC} fullmesh (全网格模式 - 与所有对端建立连接)"
+    echo -e "${YELLOW}3.${NC} subflow backup (备用模式)"
     echo ""
 
-    read -p "请选择端点类型 [1-3]: " type_choice
+    read -p "请选择端点类型(回车默认 1) [1-3]: " type_choice
+
+    # 设置默认值
+    if [ -z "$type_choice" ]; then
+        type_choice="1"
+    fi
 
     local endpoint_type
     local type_description
     case "$type_choice" in
         "1")
-            endpoint_type="subflow"
-            type_description="subflow (客户端模式)"
+            endpoint_type="subflow fullmesh"
+            type_description="subflow fullmesh (全网格模式)"
             ;;
         "2")
             endpoint_type="signal"
             type_description="signal (服务端模式)"
             ;;
         "3")
-            endpoint_type="subflow fullmesh"
-            type_description="subflow fullmesh (全网格模式)"
+            endpoint_type="subflow backup"
+            type_description="subflow backup (备用模式)"
             ;;
         *)
-            echo -e "${RED}无效的选择，默认使用subflow模式${NC}"
-            endpoint_type="subflow"
-            type_description="subflow (客户端模式)"
+            echo -e "${RED}无效的选择，请重新输入${NC}"
+            return 1
             ;;
     esac
-
-    # 自动设置连接限制为最大值
-    echo -e "${YELLOW}正在设置MPTCP连接限制为最大值...${NC}"
-    /usr/bin/ip mptcp limits set subflows 8 add_addr_accepted 8 2>/dev/null
-
     # 批量添加MPTCP端点
     echo -e "${YELLOW}正在添加MPTCP端点...${NC}"
     local success_count=0
@@ -2842,16 +2899,9 @@ add_mptcp_endpoint_interactive() {
         get_mptcp_endpoints_status
     else
         echo -e "${YELLOW}可能的原因:${NC}"
-        echo -e "  • iproute2版本不支持MPTCP"
+        echo -e "  • 系统过低导致iproute2版本不支持MPTCP"
         echo -e "  • IP地址已存在"
         echo -e "  • 网络接口配置问题"
-        echo -e "  • 权限不足"
-        echo ""
-        echo -e "${BLUE}调试信息:${NC}"
-        echo -e "  • 检查iproute2版本: ip -V"
-        echo -e "  • 检查MPTCP支持: ip mptcp help"
-        echo -e "  • 检查当前端点: ip mptcp endpoint show"
-        return 1
     fi
 }
 
@@ -2881,7 +2931,17 @@ delete_mptcp_endpoint_interactive() {
             local id=$(echo "$line" | grep -oP 'id \K[0-9]+' || echo "")
             local addr=$(echo "$line" | grep -oP '^[^ ]+' || echo "")
             local dev=$(echo "$line" | grep -oP 'dev \K[^ ]+' || echo "")
-            local flags=$(echo "$line" | grep -oP '\[(.*?)\]' || echo "[signal]")
+            # 解析MPTCP端点类型：脚本支持的三种模式
+            local flags=""
+            if echo "$line" | grep -q "subflow.*fullmesh"; then
+                flags="[subflow fullmesh]"
+            elif echo "$line" | grep -q "subflow.*backup"; then
+                flags="[subflow backup]"
+            elif echo "$line" | grep -q "signal"; then
+                flags="[signal]"
+            else
+                flags="[unknown]"
+            fi
 
             echo -e "  ${endpoint_count}. ID $id: $addr dev $dev $flags"
         fi
@@ -2977,6 +3037,13 @@ show_mptcp_detailed_status() {
     else
         echo -e "  ${YELLOW}暂无活跃MPTCP连接${NC}"
     fi
+    echo ""
+
+    # 实时MPTCP事件监控
+    echo -e "${BLUE}实时MPTCP事件监控:${NC}"
+    echo -e "${YELLOW}正在启动实时监控，按 Ctrl+C 退出...${NC}"
+    echo ""
+    ip mptcp monitor || echo -e "  ${YELLOW}MPTCP事件监控不可用${NC}"
 }
 
 # 验证IP地址格式

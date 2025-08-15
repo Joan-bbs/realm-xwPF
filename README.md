@@ -31,7 +31,7 @@
 ## 🚀 快速开始
 
 ### 一键安装
-使用wegt
+
 ```bash
 wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
@@ -185,16 +185,13 @@ MPTCP端点不是创建一张新的虚拟网卡，而是：
 **Q:为什么需要同时指定IP和网卡？**
 网卡接口：系统需要知道这个IP地址对应哪个物理网卡，用于路由选择
 IP地址：MPTCP协议需要知道可以使用哪些IP地址建立子流
-192.168.1.100 dev eth0 subflow = 告诉MPTCP可以通过eth0网卡的这个IP建立连接
-10.0.0.50 dev eth1 subflow = 告诉MPTCP可以通过eth1网卡的这个IP建立连接
+192.168.1.100 dev eth0 subflow fullmesh = 告诉MPTCP可以通过eth0网卡的这个IP建立连接
+10.0.0.50 dev eth1 subflow fullmesh = 告诉MPTCP可以通过eth1网卡的这个IP建立连接
 
 如果想要更精细的控制，可以考虑：
 
-服务端也设置subflow端点：
-让服务端主动发起到中转机的连接，可能或许提高连接建立速度
-使用fullmesh模式：
-在网络环境复杂时提供更多连接路径
-但会增加复杂性
+服务端也设置signal端点：
+精细化控制mptcp
 
 </details>
 
