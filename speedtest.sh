@@ -740,6 +740,35 @@ show_progress_bar() {
     echo ""
 }
 
+# 获取TCP拥塞控制算法信息（仅获取，不显示）
+get_tcp_congestion_info() {
+    local result="$1"
+    local test_type="$2"  # "upload" 或 "download"
+
+    # 从iperf3输出中获取发送端和接收端算法
+    local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
+    local rcv_congestion=$(echo "$result" | grep "rcv_tcp_congestion" | awk '{print $2}')
+
+    # 根据测试类型确定显示格式
+    if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
+        if [ "$test_type" = "upload" ]; then
+            # 上行测试：本机发送，远端接收
+            echo "(发) ${snd_congestion} > (收) ${rcv_congestion}"
+        else
+            # 下行测试：远端发送，本机接收
+            echo "(发) ${snd_congestion} > (收) ${rcv_congestion}"
+        fi
+    elif [ -n "$snd_congestion" ]; then
+        echo "$snd_congestion"
+    elif [ -n "$rcv_congestion" ]; then
+        echo "$rcv_congestion"
+    else
+        # 备用：从系统获取本地算法
+        local local_congestion=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo "未知")
+        echo "$local_congestion"
+    fi
+}
+
 # 解析iperf3输出数据
 parse_iperf3_data() {
     local line="$1"
@@ -747,7 +776,18 @@ parse_iperf3_data() {
 
     case "$data_type" in
         "transfer")
-            echo "$line" | grep -o '[0-9.]\+\s*MBytes' | head -1 | grep -o '[0-9.]\+'
+            # MBytes和GBytes，统一转换为MBytes
+            local transfer_data=$(echo "$line" | grep -o '[0-9.]\+\s*[MG]Bytes' | head -1)
+            if [ -n "$transfer_data" ]; then
+                local value=$(echo "$transfer_data" | grep -o '[0-9.]\+')
+                local unit=$(echo "$transfer_data" | grep -o '[MG]Bytes')
+                if [ "$unit" = "GBytes" ]; then
+                    # GBytes转换为MBytes (1 GB = 1024 MB)
+                    awk "BEGIN {printf \"%.1f\", $value * 1024}"
+                else
+                    echo "$value"
+                fi
+            fi
             ;;
         "bitrate")
             # 提取Mbits/sec数值
@@ -778,7 +818,7 @@ run_tcp_single_thread_test() {
 
     # 后台执行iperf3，前台显示倒计时
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -V > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP单线程测试"
@@ -791,7 +831,7 @@ run_tcp_single_thread_test() {
     if [ $exit_code -ne 0 ]; then
         sleep 0.5
         : > "$temp_result"
-        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
+        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -V > "$temp_result" 2>&1) &
         local test_pid2=$!
         show_progress_bar "$TEST_DURATION" "TCP单线程测试"
         wait $test_pid2
@@ -825,7 +865,7 @@ run_tcp_single_thread_test() {
             fi
 
             echo -e "${GREEN}TCP上行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -V${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
@@ -840,17 +880,9 @@ run_tcp_single_thread_test() {
 
             echo -e "平均发送速率 (Sender): ${YELLOW}${mbps} Mbps${NC} (${YELLOW}${mb_per_sec} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
 
-            # 获取TCP拥塞控制算法
-            local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
-            local rcv_congestion=$(echo "$result" | grep "rcv_tcp_congestion" | awk '{print $2}')
-
-            if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
-                echo -e "TCP 拥塞控制算法: ${YELLOW}(发) ${snd_congestion} > (收) ${rcv_congestion}${NC}"
-            elif [ -n "$snd_congestion" ]; then
-                echo -e "TCP 拥塞控制算法: ${YELLOW}${snd_congestion}${NC}"
-            else
-                echo -e "TCP 拥塞控制算法: ${YELLOW}系统默认${NC}"
-            fi
+            # 获取并显示TCP拥塞控制算法
+            local tcp_congestion_info=$(get_tcp_congestion_info "$result" "upload")
+            echo -e "TCP 拥塞控制算法: ${YELLOW}${tcp_congestion_info}${NC}"
 
             # 显示重传次数（不计算重传率，避免估算误差）
             echo -e "重传次数: ${YELLOW}${final_retrans:-0} 次${NC}"
@@ -867,11 +899,7 @@ run_tcp_single_thread_test() {
             set_test_result "tcp_up_speed_mibs" "$mb_per_sec"
             set_test_result "tcp_up_transfer" "$final_transfer"
             set_test_result "tcp_up_retrans" "$final_retrans"
-            if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
-                set_test_result "tcp_up_congestion" "(发) ${snd_congestion} > (收) ${rcv_congestion}"
-            elif [ -n "$snd_congestion" ]; then
-                set_test_result "tcp_up_congestion" "$snd_congestion"
-            fi
+            set_test_result "tcp_up_congestion" "$tcp_congestion_info"
 
             # 保存TCP Mbps值，四舍五入到10的倍数，用于UDP的-b参数
             if [ "$mbps" != "N/A" ]; then
@@ -1002,7 +1030,7 @@ run_udp_single_test() {
                 local jitter=$(parse_iperf3_data "$receiver_line" "jitter")
                 local loss_info=$(parse_iperf3_data "$receiver_line" "loss")
 
-                # receiver_bitrate现在是Mbits/sec的数值
+                # receiver_bitrate格式Mbits/sec
                 local recv_mbps="N/A"
                 local recv_mb_per_sec="N/A"
                 if [ -n "$receiver_bitrate" ] && [[ "$receiver_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
@@ -1057,7 +1085,7 @@ run_tcp_download_test() {
 
     # 后台执行测试，前台显示进度条
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -R > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -R -V > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP下行测试"
@@ -1070,7 +1098,6 @@ run_tcp_download_test() {
         local result=$(cat "$temp_result")
         echo ""
         echo -e "${BLUE}📋 测试数据:${NC}"
-        # 过滤掉开头和结尾的杂乱信息，保留核心测试数据
         echo "$result" | sed -n '/\[ *[0-9]\]/,/^$/p' | sed '/^- - - - -/,$d' | sed '/^$/d'
 
         # 解析最终结果 - 下行测试需要使用receiver行数据
@@ -1098,12 +1125,12 @@ run_tcp_download_test() {
             fi
 
             echo -e "${GREEN}TCP下行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -R${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -R -V${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
 
-            # final_bitrate现在是Mbits/sec的数值
+            # final_bitrate格式Mbits/sec
             local mbps="N/A"
             local mb_per_sec="N/A"
             if [ -n "$final_bitrate" ] && [[ "$final_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
@@ -1113,17 +1140,9 @@ run_tcp_download_test() {
 
             echo -e "平均下行速率 (Receiver): ${YELLOW}${mbps} Mbps${NC} (${YELLOW}${mb_per_sec} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
 
-            # 获取TCP拥塞控制算法
-            local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
-            local rcv_congestion=$(echo "$result" | grep "rcv_tcp_congestion" | awk '{print $2}')
-
-            if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
-                echo -e "TCP 拥塞控制算法: ${YELLOW}(发) ${snd_congestion} > (收) ${rcv_congestion}${NC}"
-            elif [ -n "$snd_congestion" ]; then
-                echo -e "TCP 拥塞控制算法: ${YELLOW}${snd_congestion}${NC}"
-            else
-                echo -e "TCP 拥塞控制算法: ${YELLOW}系统默认${NC}"
-            fi
+            # 获取并显示TCP拥塞控制算法
+            local tcp_congestion_info=$(get_tcp_congestion_info "$result" "download")
+            echo -e "TCP 拥塞控制算法: ${YELLOW}${tcp_congestion_info}${NC}"
 
             # 显示重传次数（不计算重传率，避免估算误差）
             echo -e "重传次数: ${YELLOW}${final_retrans:-0} 次${NC}"
@@ -1142,11 +1161,7 @@ run_tcp_download_test() {
             set_test_result "tcp_down_retrans" "$final_retrans"
 
             # 收集TCP下行拥塞控制算法
-            if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
-                set_test_result "tcp_down_congestion" "(发) ${snd_congestion} > (收) ${rcv_congestion}"
-            elif [ -n "$snd_congestion" ]; then
-                set_test_result "tcp_down_congestion" "$snd_congestion"
-            fi
+            set_test_result "tcp_down_congestion" "$tcp_congestion_info"
 
             # 保存TCP下行Mbps值，四舍五入到10的倍数，用于UDP下行的-b参数
             if [ "$mbps" != "N/A" ]; then
@@ -1225,7 +1240,7 @@ run_udp_download_test() {
                 local jitter=$(parse_iperf3_data "$receiver_line" "jitter")
                 local loss_info=$(parse_iperf3_data "$receiver_line" "loss")
 
-                # receiver_bitrate现在是Mbits/sec的数值
+                # receiver_bitrate格式Mbits/sec
                 local recv_mbps="N/A"
                 local recv_mb_per_sec="N/A"
                 if [ -n "$receiver_bitrate" ] && [[ "$receiver_bitrate" =~ ^[0-9]+\.?[0-9]*$ ]]; then
