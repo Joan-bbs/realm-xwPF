@@ -41,6 +41,12 @@ DOWNLOAD_SOURCES=(
     "https://ghproxy.gpnu.org/"
 )
 
+# 全局超时配置
+SHORT_CONNECT_TIMEOUT=5
+SHORT_MAX_TIMEOUT=7
+LONG_CONNECT_TIMEOUT=15
+LONG_MAX_TIMEOUT=20
+
 # 核心路径变量
 REALM_PATH="/usr/local/bin/realm"
 CONFIG_DIR="/etc/realm"
@@ -185,14 +191,14 @@ get_public_ip() {
     fi
 
     # 优先使用ipinfo.io
-    ip=$(curl -s --connect-timeout 5 --max-time 10 $curl_opts https://ipinfo.io/ip 2>/dev/null | tr -d '\n\r ')
+    ip=$(curl -s --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT $curl_opts https://ipinfo.io/ip 2>/dev/null | tr -d '\n\r ')
     if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
         echo "$ip"
         return 0
     fi
 
     # 备用cloudflare trace
-    ip=$(curl -s --connect-timeout 5 --max-time 10 $curl_opts https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | cut -d'=' -f2 | tr -d '\n\r ')
+    ip=$(curl -s --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT $curl_opts https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | cut -d'=' -f2 | tr -d '\n\r ')
     if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
         echo "$ip"
         return 0
@@ -5110,8 +5116,6 @@ install_realm_from_local_package() {
 download_from_sources() {
     local url="$1"
     local target_path="$2"
-    local timeout="${3:-30}"
-    local connect_timeout="${4:-10}"
 
     for proxy in "${DOWNLOAD_SOURCES[@]}"; do
         local full_url="${proxy}${url}"
@@ -5126,7 +5130,7 @@ download_from_sources() {
         # 将状态消息重定向到 stderr (>&2)
         echo -e "${BLUE}尝试 $source_name${NC}" >&2
 
-        if curl -fsSL --connect-timeout "$connect_timeout" --max-time "$timeout" "$full_url" -o "$target_path"; then
+        if curl -fsSL --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT "$full_url" -o "$target_path"; then
             echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
             return 0
         else
@@ -5153,7 +5157,7 @@ download_with_fallback() {
     local file_path="${work_dir}/${filename}"
 
     # 使用统一的多源下载函数
-    if download_from_sources "$base_url" "$file_path" 30 10; then
+    if download_from_sources "$base_url" "$file_path"; then
         echo "$file_path"  # 返回文件路径
         return 0
     else
@@ -5177,7 +5181,7 @@ reliable_download() {
 
     # curl下载（带进度条）
     if command -v curl >/dev/null 2>&1; then
-        if curl -L --progress-bar --fail -o "$file_path" "$url"; then
+        if curl -L --progress-bar --fail --connect-timeout $LONG_CONNECT_TIMEOUT --max-time $LONG_MAX_TIMEOUT -o "$file_path" "$url"; then
             if [ -f "$file_path" ] && [ -s "$file_path" ]; then
                 echo "$file_path"
                 return 0
@@ -5205,7 +5209,7 @@ get_latest_realm_version() {
     echo -e "${YELLOW}获取最新版本信息...${NC}" >&2
 
     # 直接解析releases页面获取版本号，超时机制
-    local latest_version=$(curl -sL --connect-timeout 5 --max-time 7 "https://github.com/zhboner/realm/releases" 2>/dev/null | \
+    local latest_version=$(curl -sL --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT "https://github.com/zhboner/realm/releases" 2>/dev/null | \
         head -2100 | \
         sed -n 's|.*releases/tag/v\([0-9.]*\).*|v\1|p' | head -1)
 
@@ -6376,7 +6380,7 @@ self_install() {
         local base_script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh"
 
         # 使用统一多源下载函数
-        if download_from_sources "$base_script_url" "${install_dir}/${script_name}" 30 10; then
+        if download_from_sources "$base_script_url" "${install_dir}/${script_name}"; then
             chmod +x "${install_dir}/${script_name}"
         else
             echo -e "${RED}✗ 脚本更新失败，手动更新wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
@@ -6393,7 +6397,7 @@ self_install() {
         local base_script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh"
 
         # 使用统一多源下载函数
-        if download_from_sources "$base_script_url" "${install_dir}/${script_name}" 30 10; then
+        if download_from_sources "$base_script_url" "${install_dir}/${script_name}"; then
             chmod +x "${install_dir}/${script_name}"
         else
             echo -e "${RED}✗ 脚本下载失败${NC}"
@@ -7504,7 +7508,7 @@ download_speedtest_script() {
     mkdir -p "$(dirname "$target_path")"
 
     # 使用统一多源下载函数
-    if download_from_sources "$script_url" "$target_path" 30 10; then
+    if download_from_sources "$script_url" "$target_path"; then
         chmod +x "$target_path"
         return 0
     else

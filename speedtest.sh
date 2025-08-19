@@ -20,6 +20,12 @@ DOWNLOAD_SOURCES=(
     "https://ghfast.top/"
 )
 
+# 全局超时配置
+SHORT_CONNECT_TIMEOUT=5
+SHORT_MAX_TIMEOUT=7
+LONG_CONNECT_TIMEOUT=15
+LONG_MAX_TIMEOUT=20
+
 # 全局变量
 TARGET_IP=""
 TARGET_PORT="5201"
@@ -51,7 +57,6 @@ cleanup_on_exit() {
     echo -e "\n${YELLOW}脚本已退出，清理完成${NC}"
 }
 
-
 # 全局User-Agent
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -59,8 +64,6 @@ USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 download_from_sources() {
     local url="$1"
     local target_path="$2"
-    local timeout="${3:-30}"
-    local connect_timeout="${4:-10}"
 
     for proxy in "${DOWNLOAD_SOURCES[@]}"; do
         local full_url="${proxy}${url}"
@@ -75,7 +78,7 @@ download_from_sources() {
         # 将状态消息重定向到 stderr (>&2)
         echo -e "${BLUE}尝试 $source_name${NC}" >&2
 
-        if curl -fsSL --connect-timeout "$connect_timeout" --max-time "$timeout" "$full_url" -o "$target_path"; then
+        if curl -fsSL --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT "$full_url" -o "$target_path"; then
             echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
             return 0
         else
@@ -235,7 +238,7 @@ install_nexttrace() {
     esac
 
     # 使用统一多源下载函数
-    if download_from_sources "$download_url" "/usr/local/bin/nexttrace" 60 10; then
+    if download_from_sources "$download_url" "/usr/local/bin/nexttrace"; then
         chmod +x /usr/local/bin/nexttrace
         return 0
     else
@@ -361,14 +364,14 @@ get_public_ip() {
     local ip=""
 
     # 优先使用ipinfo.io
-    ip=$(curl -s --connect-timeout 5 --max-time 10 "https://ipinfo.io/ip" 2>/dev/null | tr -d '\n\r ')
+    ip=$(curl -s --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT "https://ipinfo.io/ip" 2>/dev/null | tr -d '\n\r ')
     if validate_ip "$ip"; then
         echo "$ip"
         return 0
     fi
 
     # 备用cloudflare trace
-    ip=$(curl -s --connect-timeout 5 --max-time 10 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d'=' -f2 | tr -d '\n\r ')
+    ip=$(curl -s --connect-timeout $SHORT_CONNECT_TIMEOUT --max-time $SHORT_MAX_TIMEOUT "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d'=' -f2 | tr -d '\n\r ')
     if validate_ip "$ip"; then
         echo "$ip"
         return 0
@@ -1652,7 +1655,7 @@ run_bgp_analysis() {
     fi
 
     # 通过IP获取ASN信息
-    local ipinfo_result=$(curl -s --connect-timeout 15 -A "$USER_AGENT" "https://ipinfo.io/$public_ip/json" 2>/dev/null)
+    local ipinfo_result=$(curl -s --connect-timeout $LONG_CONNECT_TIMEOUT --max-time $LONG_MAX_TIMEOUT -A "$USER_AGENT" "https://ipinfo.io/$public_ip/json" 2>/dev/null)
     if [ -z "$ipinfo_result" ]; then
         echo -e "${YELLOW}⚠️  无法获取IP信息，跳过BGP分析${NC}"
         echo ""
@@ -1675,7 +1678,7 @@ run_bgp_analysis() {
     fi
 
     # 获取AS页面内容
-    local as_page=$(curl -s --connect-timeout 20 -A "$USER_AGENT" "https://bgp.tools/as/$asn" 2>/dev/null)
+    local as_page=$(curl -s --connect-timeout $LONG_CONNECT_TIMEOUT --max-time $LONG_MAX_TIMEOUT -A "$USER_AGENT" "https://bgp.tools/as/$asn" 2>/dev/null)
     if [ -z "$as_page" ]; then
         echo -e "${YELLOW}⚠️  无法获取AS页面信息${NC}"
         echo ""
@@ -1699,7 +1702,7 @@ run_bgp_analysis() {
     local total_asn_count=0
 
     if [ -n "$pathimg_url" ]; then
-        svg_data=$(curl -s --connect-timeout 20 -A "$USER_AGENT" "https://bgp.tools$pathimg_url" 2>/dev/null)
+        svg_data=$(curl -s --connect-timeout $LONG_CONNECT_TIMEOUT --max-time $LONG_MAX_TIMEOUT -A "$USER_AGENT" "https://bgp.tools$pathimg_url" 2>/dev/null)
 
         if [ -n "$svg_data" ]; then
             # 解析SVG节点数据
@@ -2357,7 +2360,7 @@ manual_update_script() {
     local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
 
     # 使用统一多源下载函数
-    if download_from_sources "$script_url" "$current_script" 30 10; then
+    if download_from_sources "$script_url" "$current_script"; then
         chmod +x "$current_script"
         echo ""
         echo -e "${GREEN}✅ 脚本更新完成${NC}"
