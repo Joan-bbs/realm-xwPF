@@ -14,9 +14,6 @@
 **Main Interface**
 ![Main Interface](https://i.mji.rip/2025/07/17/00ea7f801a89bb83cf6d4cbef4a050e5.png)
 
-**Scheduled Task Management**
-![Scheduled Tasks](https://i.mji.rip/2025/07/11/46ad95de9117d32b444097ead36f9850.png)
-
 **Forwarding Configuration Management**
 ![Configuration Management](https://i.mji.rip/2025/07/17/56557ca87dee48d112b735ad78e0f65e.png)
 
@@ -39,7 +36,7 @@ wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sud
 ### Network-Restricted Environments Use Accelerated Source, One-Click Installation
 
 ```bash
-wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://ghfast.top/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ## 🧭 Completely Offline Installation
@@ -67,25 +64,28 @@ Create any directory and place the script and compressed package files there. Wh
 
 ## ✨ Core Features
 
-- **🚀 Quick Experience** - One-click installation for quick hands-on experience with the joy of network forwarding
+- **🚀 Quick Experience** - One-click installation for quick lightweight hands-on experience with network forwarding
 - **🔄 Failover** - Uses system tools to achieve automatic failure detection while maintaining lightweight design
 - **⚖️ Load Balancing** - Supports round-robin, IP hash strategies with configurable weight distribution
 - **🕳️ Tunnel Building** - Dual-realm architecture supports TLS, ws encrypted transmission for tunnel construction
 - **✍️ Rule Comments** - Clear commenting functionality, no need for additional memorization
+- **💻 Intuitive MPTCP System Configuration** - Clear MPTCP interface display
 - **🛜 Network Link Testing** - Test link latency, bandwidth, stability, and whether routing is detoured
 
-- **📋 Export Configuration Files** - View current configuration, copy and paste to create .json file for export
-- **📒 Import Configuration Files** - Automatically recognize JSON configuration files in the same directory for import, or input complete file path for recognition and import
-- **⏰ Scheduled Tasks** - Support for scheduled restarts, responding to DDNS domain update resolution
+- **📋 One-Click Export** - Package all files into a compressed archive for free migration (including comments and all information for complete migration)
+- **📒 One-Click Import** - Recognize exported compressed packages for complete free migration
 - **🔧 Intelligent Detection** - Automatic detection of system architecture, port conflicts, connection availability
 
 - **📝 Intelligent Log Management** - Automatic log size limitation to prevent excessive disk usage
 - **🗑️ Complete Uninstallation** - Phased comprehensive cleanup, "I leave gently, just as I came gently"
 - **⚡ Full Native Realm Functionality** - Supports all native features of the latest realm version
 - tcp/udp protocols
+- ws/wss/tls encryption
 - Single relay to multiple exits
 - Multiple relays to single exit
-- Specify a specific entry IP for the relay server and a specific exit IP, suitable for multi-IP situations and one-entry-multiple-exits and multiple-entries-one-exit scenarios
+- Proxy Protocol
+- MPTCP
+- Specify a specific entry IP for the relay server and a specific exit IP (suitable for multi-IP situations and one-entry-multiple-exits and multiple-entries-one-exit scenarios)
 - More usage patterns refer to [zhboner/realm](https://github.com/zhboner/realm)
 
 ## 🗺️ Diagrams to Understand Working Principles in Different Scenarios (Recommended)
@@ -164,7 +164,30 @@ Native realm does not currently support failover.
 7. If status changes, create update marker file
 ```
 
-Clients can use the command `while ($true) { (Invoke-WebRequest -Uri 'http://ifconfig.me/ip' -UseBasicParsing).Content; Start-Sleep -Seconds 1 }` or `while true; do curl -s ifconfig.me; echo; sleep 1; done` to monitor IP changes in real-time.
+Clients can use the command `while ($true) { (Invoke-WebRequest -Uri 'http://ifconfig.me/ip' -UseBasicParsing).Content; Start-Sleep -Seconds 1 }` or `while true; do curl -s ifconfig.me; echo; sleep 1; done` to monitor IP changes in real-time and confirm mode effectiveness.
+
+</details>
+
+<details>
+<summary>
+<strong>Dual-Realm MPTCP System Integration</strong>
+</summary>
+
+MPTCP endpoints don't create a new virtual network interface, but rather:
+Tell the MPTCP protocol stack: this IP address can be used for MPTCP connections
+Specify paths: data can be transmitted through this IP address and corresponding network interface
+Establish multiple paths: allow a single TCP connection to use multiple network paths simultaneously
+
+**Q: Why specify both IP and network interface?**
+Network interface: the system needs to know which physical network interface this IP address corresponds to for routing selection
+IP address: the MPTCP protocol needs to know which IP addresses can be used to establish subflows
+192.168.1.100 dev eth0 subflow fullmesh = tells MPTCP it can establish connections through this IP on eth0 interface
+10.0.0.50 dev eth1 subflow fullmesh = tells MPTCP it can establish connections through this IP on eth1 interface
+
+For more fine-grained control, consider:
+
+Server-side signal endpoint configuration:
+Fine-grained MPTCP control
 
 </details>
 
@@ -205,6 +228,7 @@ Principle: prioritize **Linux native lightweight tools**, keeping the system cle
 | `nc` | Network connection testing | ✅ |
 | `grep`/`cut` | Text processing and recognition | ✅ |
 | `inotify` | Marker files | ✅ |
+| `iproute2` | MPTCP endpoint management | ✅ |
 
 ## 📁 File Structure
 
@@ -224,8 +248,6 @@ File organization structure after installation:
 │   │   ├── rule-1.conf          # Rule 1 configuration
 │   │   ├── rule-2.conf          # Rule 2 configuration
 │   │   └── ...
-│   ├── cron/                    # Scheduled tasks directory
-│   │   └── tasks.conf           # Task configuration file
 │   └── health/                  # Health check directory (failover)
 │       └── health_status.conf   # Health status file
 │
@@ -233,6 +255,9 @@ File organization structure after installation:
 │   ├── realm.service            # Main service file
 │   ├── realm-health-check.service  # Health check service
 │   └── realm-health-check.timer    # Health check timer
+│
+├── /etc/sysctl.d/
+│   └── 90-enable-MPTCP.conf     # MPTCP system configuration file
 │
 └── /var/log/
     └── realm.log                # Service log file
@@ -247,8 +272,8 @@ File organization structure after installation:
 ## 🙏 Acknowledgments
 
 - [zhboner/realm](https://github.com/zhboner/realm) - Providing the core Realm program
+- "https://ghfast.top/""https://ghproxy.gpnu.org/""https://gh.222322.xyz/" - Providing public accelerated sources
 - All users who provided feedback and suggestions for the project
-- "https://demo.52013120.xyz/" "https://proxy.vvvv.ee/" "https://ghfast.top/" - Providing public accelerated sources
 
 ---
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.6.0"
+SCRIPT_VERSION="v1.6.1"
 
 # 全局变量声明
 ROLE=""
@@ -51,10 +51,6 @@ LOG_PATH="/var/log/realm.log"
 
 # 转发配置管理路径
 RULES_DIR="${CONFIG_DIR}/rules"
-
-# 定时任务管理路径
-CRON_DIR="${CONFIG_DIR}/cron"
-CRON_TASKS_FILE="${CRON_DIR}/tasks.conf"
 
 # 默认伪装域名（双端realm搭建隧道需要相同SNI）
 DEFAULT_SNI_DOMAIN="www.tesla.com"
@@ -561,41 +557,6 @@ manage_log_size() {
     fi
 }
 
-# 验证JSON配置文件语法
-validate_json_config() {
-    local config_file="$1"
-
-    if [ ! -f "$config_file" ]; then
-        echo -e "${RED}配置文件不存在: $config_file${NC}"
-        return 1
-    fi
-
-    # 使用python验证JSON语法（如果可用）
-    if command -v python3 >/dev/null 2>&1; then
-        if python3 -m json.tool "$config_file" >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ JSON配置文件语法正确${NC}"
-            return 0
-        else
-            echo -e "${RED}✗ JSON配置文件语法错误${NC}"
-            echo -e "${YELLOW}使用以下命令查看详细错误:${NC}"
-            echo -e "${GREEN}python3 -m json.tool $config_file${NC}"
-            return 1
-        fi
-    elif command -v jq >/dev/null 2>&1; then
-        if jq empty "$config_file" >/dev/null 2>&1; then
-            echo -e "${GREEN}✓ JSON配置文件语法正确${NC}"
-            return 0
-        else
-            echo -e "${RED}✗ JSON配置文件语法错误${NC}"
-            echo -e "${YELLOW}使用以下命令查看详细错误:${NC}"
-            echo -e "${GREEN}jq empty $config_file${NC}"
-            return 1
-        fi
-    else
-        echo -e "${YELLOW}⚠ 无法验证JSON语法（缺少python3或jq）${NC}"
-        return 0
-    fi
-}
 
 # 获取中转服务器监听IP（用户动态输入）
 get_nat_server_listen_ip() {
@@ -836,9 +797,6 @@ list_rules_for_management() {
 
                 local display_target=$(smart_display_target "$REMOTE_HOST")
                 local rule_display_name="$RULE_NAME"
-                if [ $relay_count -gt 1 ]; then
-                    rule_display_name="$RULE_NAME-$relay_count"
-                fi
 
                 # 构建负载均衡信息
                 local balance_mode="${BALANCE_MODE:-off}"
@@ -877,9 +835,6 @@ list_rules_for_management() {
                 local target_port="${FORWARD_TARGET##*:}"
                 local display_target=$(smart_display_target "$target_host")
                 local rule_display_name="$RULE_NAME"
-                if [ $exit_count -gt 1 ]; then
-                    rule_display_name="$RULE_NAME-$exit_count"
-                fi
 
                 # 落地服务器不需要负载均衡信息
                 local balance_info=""
@@ -954,7 +909,7 @@ list_all_rules() {
                 local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                 local note_display=""
                 if [ -n "$RULE_NOTE" ]; then
-                    note_display=" | 备注: $RULE_NOTE"
+                    note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                 fi
                 echo -e "  通用配置: ${YELLOW}$security_display${NC}${note_display} | 状态: ${status_color}$status_text${NC}"
                 # 根据规则角色显示不同的转发信息
@@ -1704,15 +1659,12 @@ rules_management_menu() {
                             local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                             local display_target=$(smart_display_target "$REMOTE_HOST")
                             local rule_display_name="$RULE_NAME"
-                            if [ $relay_count -gt 1 ]; then
-                                rule_display_name="$RULE_NAME-$relay_count"
-                            fi
                             local display_ip=$(get_nat_server_listen_ip)
                             local through_display="${THROUGH_IP:-::}"
                             echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                             local note_display=""
                             if [ -n "$RULE_NOTE" ]; then
-                                note_display=" | 备注: $RULE_NOTE"
+                                note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                             fi
                             # 添加MPTCP状态显示
                             local mptcp_mode="${MPTCP_MODE:-off}"
@@ -1757,14 +1709,11 @@ rules_management_menu() {
                             local target_port="${FORWARD_TARGET##*:}"
                             local display_target=$(smart_display_target "$target_host")
                             local rule_display_name="$RULE_NAME"
-                            if [ $exit_count -gt 1 ]; then
-                                rule_display_name="$RULE_NAME-$exit_count"
-                            fi
                             local display_ip=$(get_exit_server_listen_ip)
                             echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                             local note_display=""
                             if [ -n "$RULE_NOTE" ]; then
-                                note_display=" | 备注: $RULE_NOTE"
+                                note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                             fi
                             # 添加MPTCP状态显示
                             local mptcp_mode="${MPTCP_MODE:-off}"
@@ -5178,16 +5127,14 @@ download_from_sources() {
         echo -e "${BLUE}尝试 $source_name${NC}" >&2
 
         if curl -fsSL --connect-timeout "$connect_timeout" --max-time "$timeout" "$full_url" -o "$target_path"; then
-            # 将状态消息重定向到 stderr (>&2)
             echo -e "${GREEN}✓ $source_name 下载成功${NC}" >&2
             return 0
         else
-            # 将状态消息重定向到 stderr (>&2)
+
             echo -e "${YELLOW}✗ $source_name 下载失败，尝试下一个源...${NC}" >&2
         fi
     done
 
-    # 将状态消息重定向到 stderr (>&2)
     echo -e "${RED}✗ 所有下载源均失败${NC}" >&2
     return 1
 }
@@ -5258,14 +5205,14 @@ get_latest_realm_version() {
     echo -e "${YELLOW}获取最新版本信息...${NC}" >&2
 
     # 直接解析releases页面获取版本号，超时机制
-    local latest_version=$(curl -sL --connect-timeout 5 --max-time 8 "https://github.com/zhboner/realm/releases" 2>/dev/null | \
+    local latest_version=$(curl -sL --connect-timeout 5 --max-time 7 "https://github.com/zhboner/realm/releases" 2>/dev/null | \
         head -2100 | \
         sed -n 's|.*releases/tag/v\([0-9.]*\).*|v\1|p' | head -1)
 
     # 如果失败，使用硬编码版本号
     if [ -z "$latest_version" ]; then
         echo -e "${YELLOW}使用当前最新版本 v2.9.1${NC}" >&2
-        latest_version="v2.9.1"
+        latest_version="v2.9.2"
     fi
 
     echo -e "${GREEN}✓ 检测到最新版本: ${latest_version}${NC}" >&2
@@ -5313,17 +5260,16 @@ compare_and_ask_update() {
     # 比较版本
     if [ "$current_ver" = "$latest_version" ]; then
         echo -e "${GREEN}✓ 当前版本已是最新版本${NC}"
-        return 1  # 不需要更新
+        return 1
     else
         echo -e "${YELLOW}发现新版本: ${current_ver} → ${latest_version}${NC}"
-        # 询问是否覆盖更新
         read -p "是否更新到最新版本？(y/n) [默认: n]: " update_choice
         if [[ ! "$update_choice" =~ ^[Yy]$ ]]; then
             echo -e "${BLUE}使用现有的 realm 安装${NC}"
-            return 1  # 用户选择不更新
+            return 1
         fi
         echo -e "${YELLOW}将更新到最新版本...${NC}"
-        return 0  # 需要更新
+        return 0
     fi
 }
 
@@ -6211,13 +6157,6 @@ EOF
 EOF
 
     echo -e "${GREEN}✓ 多规则配置文件已生成${NC}"
-
-    # 验证JSON语法
-    if ! validate_json_config "$CONFIG_PATH"; then
-        echo -e "${RED}✗ 配置文件生成失败，JSON语法错误${NC}"
-        return 1
-    fi
-
     echo -e "${BLUE}配置详情: $enabled_count 个启用的转发规则${NC}"
 
     # 显示规则摘要
@@ -6296,13 +6235,6 @@ generate_legacy_config() {
 }
 EOF
         echo -e "${GREEN}✓ 中转服务器配置文件已生成${NC}"
-
-        # 验证JSON语法
-        if ! validate_json_config "$CONFIG_PATH"; then
-            echo -e "${RED}✗ 配置文件生成失败，JSON语法错误${NC}"
-            return 1
-        fi
-
         echo -e "${BLUE}配置详情:${NC}"
         local display_ip=$(get_nat_server_listen_ip)
         echo -e "  监听地址: ${GREEN}${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT${NC}"
@@ -6343,13 +6275,6 @@ EOF
 }
 EOF
         echo -e "${GREEN}✓ 出口服务器配置文件已生成${NC}"
-
-        # 验证JSON语法
-        if ! validate_json_config "$CONFIG_PATH"; then
-            echo -e "${RED}✗ 配置文件生成失败，JSON语法错误${NC}"
-            return 1
-        fi
-
         echo -e "${BLUE}配置详情:${NC}"
         echo -e "  监听端口: ${GREEN}$EXIT_LISTEN_PORT${NC}"
         echo -e "  转发到: ${GREEN}${FORWARD_TARGET:-$FORWARD_IP:$FORWARD_PORT}${NC}"
@@ -6655,7 +6580,7 @@ service_status() {
                     local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                     local note_display=""
                     if [ -n "$RULE_NOTE" ]; then
-                        note_display=" | 备注: $RULE_NOTE"
+                        note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                     fi
                     # 添加MPTCP状态显示
                     local mptcp_mode="${MPTCP_MODE:-off}"
@@ -6751,65 +6676,6 @@ service_status() {
     systemctl status realm --no-pager -l
 }
 
-# 清理定时任务（卸载时调用）
-cleanup_cron_tasks() {
-    # 检查是否存在定时任务
-    if [ ! -f "$CRON_TASKS_FILE" ] || [ ! -s "$CRON_TASKS_FILE" ]; then
-        echo -e "${GRAY}  无定时任务需要清理${NC}"
-        return 0
-    fi
-
-    # 显示将要清理的定时任务
-    echo -e "${YELLOW}  发现以下定时任务:${NC}"
-    local task_count=0
-    while IFS='|' read -r id type interval next_time status created_time; do
-        if [[ "$id" =~ ^[0-9]+$ ]]; then
-            echo -e "    ID $id: $type"
-            task_count=$((task_count + 1))
-        fi
-    done < "$CRON_TASKS_FILE"
-
-    if [ "$task_count" -eq 0 ]; then
-        echo -e "${GRAY}  无有效定时任务需要清理${NC}"
-        return 0
-    fi
-
-    echo -e "${BLUE}  正在清理 $task_count 个定时任务...${NC}"
-
-    # 清理每个定时任务
-    while IFS='|' read -r id type interval next_time status created_time; do
-        if [[ "$id" =~ ^[0-9]+$ ]]; then
-            # 删除定时任务脚本
-            local cron_script="/etc/realm/cron_restart_${id}.sh"
-            if [ -f "$cron_script" ]; then
-                rm -f "$cron_script" && echo -e "${GREEN}✓${NC}   已删除定时脚本: cron_restart_${id}.sh"
-            fi
-
-            # 从系统cron中删除相关条目
-            if crontab -l 2>/dev/null | grep -q "cron_restart_${id}.sh"; then
-                crontab -l 2>/dev/null | grep -v "# Realm restart task $id" | grep -v "cron_restart_${id}.sh" | crontab -
-                echo -e "${GREEN}✓${NC}   已从crontab删除任务: $id"
-            fi
-        fi
-    done < "$CRON_TASKS_FILE"
-
-    # 删除定时任务配置文件
-    if [ -f "$CRON_TASKS_FILE" ]; then
-        rm -f "$CRON_TASKS_FILE" && echo -e "${GREEN}✓${NC}   已删除定时任务配置文件"
-    fi
-
-    # 删除定时任务目录（如果为空）
-    if [ -d "$CRON_DIR" ]; then
-        rmdir "$CRON_DIR" 2>/dev/null && echo -e "${GREEN}✓${NC}   已删除定时任务目录"
-    fi
-
-    # 删除定时任务日志
-    if [ -f "/var/log/realm_cron.log" ]; then
-        rm -f "/var/log/realm_cron.log" && echo -e "${GREEN}✓${NC}   已删除定时任务日志"
-    fi
-
-    echo -e "${GREEN}✓${NC} 定时任务清理完成"
-}
 
 # 清理防火墙规则（卸载时调用）
 cleanup_firewall_rules() {
@@ -6915,7 +6781,6 @@ uninstall_realm() {
     echo -e "  - Realm 主程序: $REALM_PATH"
     echo -e "  - 配置目录: $CONFIG_DIR"
     echo -e "  - 规则目录: $RULES_DIR"
-    echo -e "  - 定时任务目录: $CRON_DIR"
     echo -e "  - 状态文件: $MANAGER_CONF"
     echo -e "  - 系统服务: $SYSTEMD_PATH"
     echo -e "  - 日志文件: $LOG_PATH"
@@ -6944,9 +6809,6 @@ uninstall_realm() {
         systemctl disable realm >/dev/null 2>&1
     fi
 
-    # 清理定时任务
-    echo -e "${BLUE}清理定时任务...${NC}"
-    cleanup_cron_tasks
 
     # 清理健康检查服务
     echo -e "${BLUE}清理健康检查服务...${NC}"
@@ -6966,7 +6828,7 @@ uninstall_realm() {
     done
 
     # 清理配置备份文件
-    for backup_dir in "/etc/realm" "$RULES_DIR" "$CRON_DIR"; do
+    for backup_dir in "/etc/realm" "$RULES_DIR"; do
         if [ -d "$backup_dir" ]; then
             find "$backup_dir" -name "*.bak" -o -name "*.backup" -o -name "*.old" -o -name "*.tmp" 2>/dev/null | while read -r file; do
                 if [ -f "$file" ]; then
@@ -7211,15 +7073,6 @@ show_config() {
         return 1
     fi
 
-    # 验证配置文件
-    echo -e "${BLUE}配置文件验证:${NC}"
-    if validate_json_config "$CONFIG_PATH"; then
-        echo ""
-    else
-        echo -e "${RED}配置文件存在语法错误${NC}"
-        echo ""
-    fi
-
     # 显示配置文件路径
     echo -e "${BLUE}配置文件位置:${NC}"
     echo -e "  主配置: ${GREEN}$CONFIG_PATH${NC}"
@@ -7278,7 +7131,7 @@ show_config() {
                         local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                         local note_display=""
                         if [ -n "$RULE_NOTE" ]; then
-                            note_display=" | 备注: $RULE_NOTE"
+                            note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                         fi
                         # 添加MPTCP状态显示
                         local mptcp_mode="${MPTCP_MODE:-off}"
@@ -7317,8 +7170,6 @@ show_config() {
 
 
 }
-
-
 
 # 智能显示转发目标地址（处理本地地址和多地址）
 smart_display_target() {
@@ -7452,15 +7303,12 @@ show_brief_status() {
                         local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                         local display_target=$(smart_display_target "$REMOTE_HOST")
                         local rule_display_name="$RULE_NAME"
-                        if [ $relay_count -gt 1 ]; then
-                            rule_display_name="$RULE_NAME-$relay_count"
-                        fi
                         local display_ip=$(get_nat_server_listen_ip)
                         local through_display="${THROUGH_IP:-::}"
                         echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                         local note_display=""
                         if [ -n "$RULE_NOTE" ]; then
-                            note_display=" | 备注: $RULE_NOTE"
+                            note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                         fi
                         # 添加MPTCP状态显示
                         local mptcp_mode="${MPTCP_MODE:-off}"
@@ -7505,14 +7353,11 @@ show_brief_status() {
                         local target_port="${FORWARD_TARGET##*:}"
                         local display_target=$(smart_display_target "$target_host")
                         local rule_display_name="$RULE_NAME"
-                        if [ $exit_count -gt 1 ]; then
-                            rule_display_name="$RULE_NAME-$exit_count"
-                        fi
                         local display_ip=$(get_exit_server_listen_ip)
                         echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                         local note_display=""
                         if [ -n "$RULE_NOTE" ]; then
-                            note_display=" | 备注: $RULE_NOTE"
+                            note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                         fi
                         # 添加MPTCP状态显示
                         local mptcp_mode="${MPTCP_MODE:-off}"
@@ -7593,36 +7438,6 @@ show_brief_status() {
 
 }
 
-#--- 定时任务管理功能 ---
-
-# 初始化定时任务目录
-init_cron_dir() {
-    mkdir -p "$CRON_DIR"
-    if [ ! -f "$CRON_TASKS_FILE" ]; then
-        cat > "$CRON_TASKS_FILE" <<EOF
-# Realm 定时任务配置文件
-# 格式: ID|类型|间隔小时|下次执行时间|状态|创建时间
-EOF
-    fi
-}
-
-# 生成任务ID
-generate_task_id() {
-    local max_id=0
-    if [ -f "$CRON_TASKS_FILE" ]; then
-        while IFS='|' read -r id type interval next_time status created_time; do
-            if [[ "$id" =~ ^[0-9]+$ ]] && [ "$id" -gt "$max_id" ]; then
-                max_id=$id
-            fi
-        done < "$CRON_TASKS_FILE"
-    fi
-    echo $((max_id + 1))
-}
-
-# 获取GMT+8时间
-get_gmt8_time() {
-    TZ='GMT-8' date "$@"
-}
 
 # 获取安全级别显示文本
 get_security_display() {
@@ -7673,271 +7488,9 @@ get_security_display() {
     esac
 }
 
-# 计算下次执行时间
-calculate_next_time() {
-    local interval_hours="$1"
-    local current_time=$(TZ='GMT-8' date +%s)
-    # 使用bc计算浮点数，支持小数小时
-    local interval_seconds=$(echo "scale=0; $interval_hours * 3600 / 1" | bc)
-    local next_time=$((current_time + interval_seconds))
-    TZ='GMT-8' date -d "@$next_time" '+%Y-%m-%d %H:%M:%S'
-}
-
-# 添加定时重启任务
-add_restart_task() {
-    echo -e "${YELLOW}=== 添加定时重启 ===${NC}"
-    echo ""
-
-    while true; do
-        read -p "请输入重启间隔(小时): " interval_hours
-        # 改进的正则表达式：支持整数和小数，但不允许只有小数点
-        if [[ "$interval_hours" =~ ^[0-9]+(\.[0-9]+)?$|^0\.[0-9]+$ ]] && (( $(echo "$interval_hours > 0 && $interval_hours <= 720" | bc -l) )); then
-            break
-        else
-            echo -e "${RED}请输入有效的数字（如: 24 或 0.5），范围: 0.01-720小时${NC}"
-        fi
-    done
-
-    # 计算下次执行时间
-    local next_time=$(calculate_next_time "$interval_hours")
-    local task_id=$(generate_task_id)
-    local task_type="每${interval_hours}小时重启"
-    local created_time=$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')
-
-    echo ""
-    echo -e "${BLUE}下次重启时间: ${GREEN}$next_time (GMT+8)${NC}"
-    echo -e "${BLUE}之后每 ${GREEN}$interval_hours${NC} ${BLUE}小时重启一次${NC}"
-    echo ""
-
-    read -p "确认添加？(y/n): " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        # 初始化目录
-        init_cron_dir
-
-        # 添加到任务文件
-        echo "$task_id|$task_type|$interval_hours|$next_time|启用|$created_time" >> "$CRON_TASKS_FILE"
-
-        # 添加到系统cron
-        add_to_system_cron "$task_id" "$interval_hours"
-
-        echo -e "${GREEN}✓ 定时重启任务已添加${NC}"
-        echo -e "${BLUE}任务ID: $task_id${NC}"
-    else
-        echo -e "${YELLOW}操作已取消${NC}"
-    fi
-
-    echo ""
-    read -p "按回车键继续..."
-}
-
-# 添加到系统cron
-add_to_system_cron() {
-    local task_id="$1"
-    local interval_hours="$2"
-
-    # 将小时转换为分钟，处理小数
-    local interval_minutes=$(echo "scale=0; $interval_hours * 60 / 1" | bc)
-
-    # 如果间隔小于1分钟，设为1分钟（cron最小精度限制）
-    if [ "$interval_minutes" -lt 1 ]; then
-        local actual_minutes=$(echo "scale=2; $interval_hours * 60" | bc)
-        echo -e "${YELLOW}注意: 间隔 ${interval_hours} 小时 = ${actual_minutes} 分钟，小于1分钟${NC}"
-        echo -e "${YELLOW}已自动调整为1分钟（cron最小精度限制）${NC}"
-        interval_minutes=1
-    fi
-
-    # 创建cron任务脚本
-    local cron_script="/etc/realm/cron_restart_${task_id}.sh"
-    cat > "$cron_script" <<EOF
-#!/bin/bash
-# Realm 定时重启脚本 - 任务ID: $task_id
-
-# 内置日志管理：控制日志文件大小
-LOG_FILE="/var/log/realm_cron.log"
-if [ -f "\$LOG_FILE" ]; then
-    FILE_SIZE=\$(stat -f%z "\$LOG_FILE" 2>/dev/null || stat -c%s "\$LOG_FILE" 2>/dev/null || echo 0)
-    if [ "\$FILE_SIZE" -gt 10485760 ]; then  # 10MB
-        tail -c 5242880 "\$LOG_FILE" > "\${LOG_FILE}.tmp" 2>/dev/null && mv "\${LOG_FILE}.tmp" "\$LOG_FILE"
-    fi
-fi
-
-# 检查服务状态
-if systemctl is-active realm >/dev/null 2>&1; then
-    echo "\$(TZ='GMT-8' date): 执行定时重启 - 任务ID: $task_id" >> /var/log/realm_cron.log
-    systemctl restart realm
-    if [ \$? -eq 0 ]; then
-        echo "\$(TZ='GMT-8' date): 重启成功" >> /var/log/realm_cron.log
-    else
-        echo "\$(TZ='GMT-8' date): 重启失败" >> /var/log/realm_cron.log
-    fi
-else
-    echo "\$(TZ='GMT-8' date): 服务未运行，跳过重启 - 任务ID: $task_id" >> /var/log/realm_cron.log
-fi
-
-# 更新下次执行时间
-# 检查是否为整数小时，优先使用小时格式
-if [[ "${interval_hours}" =~ ^[0-9]+$ ]]; then
-    # 整数小时，直接使用小时计算
-    next_time=\$(TZ='GMT-8' date -d "+${interval_hours} hours" '+%Y-%m-%d %H:%M:%S')
-else
-    # 小数小时，转换为分钟计算
-    interval_minutes=\$(echo "scale=0; ${interval_hours} * 60 / 1" | bc)
-    next_time=\$(TZ='GMT-8' date -d "+\${interval_minutes} minutes" '+%Y-%m-%d %H:%M:%S')
-fi
-sed -i "s/^$task_id|\\([^|]*\\)|\\([^|]*\\)|\\([^|]*\\)|/\$task_id|\\1|\\2|\$next_time|/" "$CRON_TASKS_FILE"
-EOF
-
-    chmod +x "$cron_script"
-
-    # 添加到crontab - 使用标准cron格式，优先使用能整除的最大单位
-    local cron_entry
-
-    # 检查是否为整数小时
-    if [[ "$interval_hours" =~ ^[0-9]+$ ]] && [ "$interval_minutes" -ge 60 ]; then
-        # 整数小时，使用小时格式
-        local interval_hours_int=$(echo "scale=0; $interval_hours / 1" | bc)
-        if [ "$interval_hours_int" -lt 24 ]; then
-            cron_entry="0 */$interval_hours_int * * * $cron_script"
-        else
-            # 大于24小时，计算天数间隔
-            local interval_days=$((interval_hours_int/24))
-            if [ "$interval_days" -lt 1 ]; then
-                interval_days=1
-            fi
-            cron_entry="0 0 */$interval_days * * $cron_script"
-        fi
-    else
-        # 非整数小时或小于1小时，使用分钟间隔
-        cron_entry="*/$interval_minutes * * * * $cron_script"
-    fi
-
-    (crontab -l 2>/dev/null; echo "# Realm restart task $task_id"; echo "$cron_entry") | crontab -
-}
-
-
-
-# 删除任务
-delete_task() {
-    echo -e "${YELLOW}=== 删除定时任务 ===${NC}"
-    echo ""
-
-    # 显示当前任务
-    if ! display_task_list; then
-        echo ""
-        read -p "按回车键继续..."
-        return
-    fi
-
-    echo ""
-    read -p "请输入要删除的任务ID: " task_id
-
-    if [[ ! "$task_id" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}无效的任务ID${NC}"
-        echo ""
-        read -p "按回车键继续..."
-        return
-    fi
-
-    # 查找任务信息
-    local task_info=$(grep "^$task_id|" "$CRON_TASKS_FILE")
-    if [ -z "$task_info" ]; then
-        echo -e "${RED}任务ID $task_id 不存在${NC}"
-        echo ""
-        read -p "按回车键继续..."
-        return
-    fi
-
-    local task_type=$(echo "$task_info" | cut -d'|' -f2)
-
-    echo ""
-    read -p "确认删除任务\"$task_type\"？(y/n): " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        # 从任务文件中删除
-        sed -i "/^$task_id|/d" "$CRON_TASKS_FILE"
-
-        # 从系统cron中删除
-        remove_from_system_cron "$task_id"
-
-        echo -e "${GREEN}✓ 任务已删除${NC}"
-    else
-        echo -e "${YELLOW}操作已取消${NC}"
-    fi
-
-    echo ""
-    read -p "按回车键继续..."
-}
-
-# 从系统cron中删除任务
-remove_from_system_cron() {
-    local task_id="$1"
-
-    # 删除cron脚本
-    local cron_script="/etc/realm/cron_restart_${task_id}.sh"
-    if [ -f "$cron_script" ]; then
-        rm -f "$cron_script"
-    fi
-
-    # 从crontab中删除相关条目
-    crontab -l 2>/dev/null | grep -v "# Realm restart task $task_id" | grep -v "cron_restart_${task_id}.sh" | crontab -
-}
-
-# 显示任务列表（避免代码重复）
-display_task_list() {
-    init_cron_dir
-
-    if [ ! -s "$CRON_TASKS_FILE" ] || [ $(grep -v '^#' "$CRON_TASKS_FILE" | wc -l) -eq 0 ]; then
-        echo -e "${GRAY}暂无定时任务${NC}"
-        return 1
-    fi
-
-    printf "%-4s %-20s %-25s %-8s\n" "ID" "类型" "下次执行时间(GMT+8)" "状态"
-    echo "---------------------------------------------------------------------"
-
-    while IFS='|' read -r id type interval next_time status created_time; do
-        if [[ "$id" =~ ^[0-9]+$ ]]; then
-            printf "%-4s %-20s %-25s %-8s\n" "$id" "$type" "$next_time" "$status"
-        fi
-    done < "$CRON_TASKS_FILE"
-
-    return 0
-}
-
-# 定时任务管理菜单
-cron_management_menu() {
-    while true; do
-        clear
-        echo -e "${GREEN}=== 定时任务管理(DDNS 变更需要重启刷新) ===${NC}"
-        echo ""
-
-        # 直接显示当前任务列表
-        display_task_list
-
-        echo ""
-        echo "请选择操作:"
-        echo -e "${BLUE}1.${NC} 添加定时重启"
-        echo -e "${RED}2.${NC} 删除任务"
-        echo -e "${YELLOW}3.${NC} 返回主菜单"
-        echo ""
-
-        read -p "请输入选择 [1-3]: " choice
-        echo ""
-
-        case $choice in
-            1)
-                add_restart_task
-                ;;
-            2)
-                delete_task
-                ;;
-            3)
-                break
-                ;;
-            *)
-                echo -e "${RED}无效选择，请输入 1-3${NC}"
-                read -p "按回车键继续..."
-                ;;
-        esac
-    done
+# 获取GMT+8时间
+get_gmt8_time() {
+    TZ='GMT-8' date "$@"
 }
 
 # 下载中转网络链路测试脚本
@@ -7999,14 +7552,13 @@ show_menu() {
         echo -e "${BLUE}2.${NC} 转发配置管理"
         echo -e "${GREEN}3.${NC} 重启服务"
         echo -e "${GREEN}4.${NC} 停止服务"
-        echo -e "${YELLOW}5.${NC} 定时任务管理"
-        echo -e "${GREEN}6.${NC} 查看日志"
-        echo -e "${BLUE}7.${NC} 中转网络链路测试"
-        echo -e "${RED}8.${NC} 卸载服务"
-        echo -e "${YELLOW}9.${NC} 退出"
+        echo -e "${GREEN}5.${NC} 查看日志"
+        echo -e "${BLUE}6.${NC} 中转网络链路测试"
+        echo -e "${RED}7.${NC} 卸载服务"
+        echo -e "${YELLOW}8.${NC} 退出"
         echo ""
 
-        read -p "请输入选择 [1-9]: " choice
+        read -p "请输入选择 [1-8]: " choice
         echo ""
 
         case $choice in
@@ -8030,29 +7582,25 @@ show_menu() {
                 ;;
             5)
                 check_dependencies
-                cron_management_menu
-                ;;
-            6)
-                check_dependencies
                 echo -e "${YELLOW}实时查看 Realm 日志 (按 Ctrl+C 返回菜单):${NC}"
                 echo ""
                 journalctl -u realm -f --no-pager
                 ;;
-            7)
+            6)
                 check_dependencies
                 speedtest_menu
                 ;;
-            8)
+            7)
                 check_dependencies
                 uninstall_realm
                 read -p "按回车键继续..."
                 ;;
-            9)
+            8)
                 echo -e "${BLUE}感谢使用 Realm 端口转发管理脚本！${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-9${NC}"
+                echo -e "${RED}无效选择，请输入 1-8${NC}"
                 read -p "按回车键继续..."
                 ;;
         esac
