@@ -104,14 +104,12 @@ declare -A TEST_RESULTS=(
     ["tcp_up_speed_mibs"]=""
     ["tcp_up_transfer"]=""
     ["tcp_up_retrans"]=""
-    ["tcp_up_congestion"]=""
 
     # TCP下行测试结果
     ["tcp_down_speed_mbps"]=""
     ["tcp_down_speed_mibs"]=""
     ["tcp_down_transfer"]=""
     ["tcp_down_retrans"]=""
-    ["tcp_down_congestion"]=""
 
     # UDP上行测试结果
     ["udp_up_speed_mbps"]=""
@@ -743,33 +741,19 @@ show_progress_bar() {
     echo ""
 }
 
-# 获取TCP拥塞控制算法信息（仅获取，不显示）
-get_tcp_congestion_info() {
-    local result="$1"
-    local test_type="$2"  # "upload" 或 "download"
+# 获取本机TCP拥塞控制算法和队列信息
+get_local_tcp_info() {
+    # 获取拥塞控制算法
+    local congestion=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo "未知")
 
-    # 从iperf3输出中获取发送端和接收端算法
-    local snd_congestion=$(echo "$result" | grep "snd_tcp_congestion" | awk '{print $2}')
-    local rcv_congestion=$(echo "$result" | grep "rcv_tcp_congestion" | awk '{print $2}')
-
-    # 根据测试类型确定显示格式
-    if [ -n "$snd_congestion" ] && [ -n "$rcv_congestion" ]; then
-        if [ "$test_type" = "upload" ]; then
-            # 上行测试：本机发送，远端接收
-            echo "(发) ${snd_congestion} > (收) ${rcv_congestion}"
-        else
-            # 下行测试：远端发送，本机接收
-            echo "(发) ${snd_congestion} > (收) ${rcv_congestion}"
-        fi
-    elif [ -n "$snd_congestion" ]; then
-        echo "$snd_congestion"
-    elif [ -n "$rcv_congestion" ]; then
-        echo "$rcv_congestion"
-    else
-        # 备用：从系统获取本地算法
-        local local_congestion=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo "未知")
-        echo "$local_congestion"
+    # 获取队列算法 ip命令
+    local qdisc="未知"
+    local default_iface=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+    if [ -n "$default_iface" ]; then
+        qdisc=$(ip link show "$default_iface" 2>/dev/null | grep -o "qdisc [^ ]*" | awk '{print $2}' | head -1 || echo "未知")
     fi
+
+    echo "${congestion}+${qdisc}"
 }
 
 # 解析iperf3输出数据
@@ -821,7 +805,7 @@ run_tcp_single_thread_test() {
 
     # 后台执行iperf3，前台显示倒计时
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -V > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP单线程测试"
@@ -834,7 +818,7 @@ run_tcp_single_thread_test() {
     if [ $exit_code -ne 0 ]; then
         sleep 0.5
         : > "$temp_result"
-        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -V > "$temp_result" 2>&1) &
+        (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m > "$temp_result" 2>&1) &
         local test_pid2=$!
         show_progress_bar "$TEST_DURATION" "TCP单线程测试"
         wait $test_pid2
@@ -845,7 +829,7 @@ run_tcp_single_thread_test() {
         local result=$(cat "$temp_result")
         echo ""
         echo -e "${BLUE}📋 测试数据:${NC}"
-        # 过滤掉开头和结尾的杂乱信息，保留核心测试数据
+        # 过滤杂乱信息，保留核心测试数据
         echo "$result" | sed -n '/\[ *[0-9]\]/,/^$/p' | sed '/^- - - - -/,$d' | sed '/^$/d'
 
         # 解析最终结果
@@ -868,7 +852,7 @@ run_tcp_single_thread_test() {
             fi
 
             echo -e "${GREEN}TCP上行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -V${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
@@ -882,10 +866,6 @@ run_tcp_single_thread_test() {
             fi
 
             echo -e "平均发送速率 (Sender): ${YELLOW}${mbps} Mbps${NC} (${YELLOW}${mb_per_sec} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
-
-            # 获取并显示TCP拥塞控制算法
-            local tcp_congestion_info=$(get_tcp_congestion_info "$result" "upload")
-            echo -e "TCP 拥塞控制算法: ${YELLOW}${tcp_congestion_info}${NC}"
 
             # 显示重传次数（不计算重传率，避免估算误差）
             echo -e "重传次数: ${YELLOW}${final_retrans:-0} 次${NC}"
@@ -902,7 +882,6 @@ run_tcp_single_thread_test() {
             set_test_result "tcp_up_speed_mibs" "$mb_per_sec"
             set_test_result "tcp_up_transfer" "$final_transfer"
             set_test_result "tcp_up_retrans" "$final_retrans"
-            set_test_result "tcp_up_congestion" "$tcp_congestion_info"
 
             # 保存TCP Mbps值，四舍五入到10的倍数，用于UDP的-b参数
             if [ "$mbps" != "N/A" ]; then
@@ -1001,7 +980,7 @@ run_udp_single_test() {
         local result=$(cat "$temp_result")
         echo ""
         echo -e "${BLUE}📋 测试数据:${NC}"
-        # 过滤掉开头和结尾的杂乱信息，保留核心测试数据
+        # 过滤杂乱信息，保留核心测试数据
         echo "$result" | sed -n '/\[ *[0-9]\]/,/^$/p' | sed '/^- - - - -/,$d' | sed '/^$/d'
 
         # 解析最终结果
@@ -1088,7 +1067,7 @@ run_tcp_download_test() {
 
     # 后台执行测试，前台显示进度条
     local temp_result=$(mktemp)
-    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -R -V > "$temp_result" 2>&1) &
+    (iperf3 -c "$TARGET_IP" -p "$TARGET_PORT" -t "$TEST_DURATION" -f m -R > "$temp_result" 2>&1) &
     local test_pid=$!
 
     show_progress_bar "$TEST_DURATION" "TCP下行测试"
@@ -1128,7 +1107,7 @@ run_tcp_download_test() {
             fi
 
             echo -e "${GREEN}TCP下行测试完成${NC}"
-            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -R -V${NC}"
+            echo -e "使用指令: ${YELLOW}iperf3 -c $TARGET_IP -p $TARGET_PORT -t $TEST_DURATION -f m -R${NC}"
             echo ""
             echo -e "${YELLOW}📊 测试结果${NC}"
             echo ""
@@ -1142,10 +1121,6 @@ run_tcp_download_test() {
             fi
 
             echo -e "平均下行速率 (Receiver): ${YELLOW}${mbps} Mbps${NC} (${YELLOW}${mb_per_sec} MB/s${NC})          总传输数据量: ${YELLOW}${final_transfer:-N/A} MB${NC}"
-
-            # 获取并显示TCP拥塞控制算法
-            local tcp_congestion_info=$(get_tcp_congestion_info "$result" "download")
-            echo -e "TCP 拥塞控制算法: ${YELLOW}${tcp_congestion_info}${NC}"
 
             # 显示重传次数（不计算重传率，避免估算误差）
             echo -e "重传次数: ${YELLOW}${final_retrans:-0} 次${NC}"
@@ -1162,9 +1137,6 @@ run_tcp_download_test() {
             set_test_result "tcp_down_speed_mibs" "$mb_per_sec"
             set_test_result "tcp_down_transfer" "$final_transfer"
             set_test_result "tcp_down_retrans" "$final_retrans"
-
-            # 收集TCP下行拥塞控制算法
-            set_test_result "tcp_down_congestion" "$tcp_congestion_info"
 
             # 保存TCP下行Mbps值，四舍五入到10的倍数，用于UDP下行的-b参数
             if [ "$mbps" != "N/A" ]; then
@@ -1214,7 +1186,7 @@ run_udp_download_test() {
         local result=$(cat "$temp_result")
         echo ""
         echo -e "${BLUE}📋 测试数据:${NC}"
-        # 过滤掉开头和结尾的杂乱信息，保留核心测试数据
+        # 过滤杂乱信息，保留核心测试数据
         echo "$result" | sed -n '/\[ *[0-9]\]/,/^$/p' | sed '/^- - - - -/,$d' | sed '/^$/d'
 
         # 解析最终结果
@@ -1837,7 +1809,7 @@ run_bgp_analysis() {
 
     # 显示图片链接
     if [ -n "$pathimg_url" ]; then
-        echo -e " ${BLUE}🛜 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
+        echo -e " ${BLUE} 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
         echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
     fi
 
@@ -1929,7 +1901,7 @@ generate_bgp_report() {
 
     # 显示图片链接
     if [ -n "$pathimg_url" ]; then
-        echo -e " ${BLUE}🛜 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
+        echo -e " ${BLUE} 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
         echo -e "─────────────────────────────────────────────────────────────────"
     fi
 }
@@ -1988,13 +1960,11 @@ run_performance_tests() {
 
 # 生成最终报告
 generate_final_report() {
-    echo ""
-    echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e "${GREEN}🏆 网络链路测试功能完成${NC}"
+    echo -e "${GREEN}========== 网络链路测试功能完整报告 ==========${NC}"
     echo ""
 
     # 报告标题
-    echo -e "${BLUE}🌐 网络性能测试报告${NC}"
+    echo -e "${BLUE}✍️ 参数测试报告${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
     echo -e "  源: 客户端 (本机发起测试)"
 
@@ -2004,10 +1974,14 @@ generate_final_report() {
 
     echo -e "  测试方向: 客户端 ↔ 服务端 "
     echo -e "  单项测试时长: ${TEST_DURATION}秒"
+
+    # 获取并显示本机TCP信息
+    local local_tcp_info=$(get_local_tcp_info)
+    echo -e "  本机：${YELLOW}${local_tcp_info}${NC}（拥塞控制算法+队列）"
     echo ""
 
     # 路由分析结果
-    echo -e "${WHITE}🗺️ TCP大包路由路径分析${NC}"
+    echo -e "${WHITE}🧭 TCP大包路由路径分析（基于nexttrace）${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
 
     if [ "$ROUTE_SUCCESS" = true ]; then
@@ -2024,7 +1998,9 @@ generate_final_report() {
     generate_bgp_report
 
     # 核心性能数据展示
-    echo -e "    ${WHITE}PING & 抖动${NC}           ${WHITE}⬆️ 上行带宽${NC}           ${WHITE}⬇️ 下行带宽${NC}"
+    echo -e "${WHITE}⚡ 网络链路参数分析（基于hping3 & iperf3）${NC}"
+    echo -e "─────────────────────────────────────────────────────────────────"
+    echo -e "    ${WHITE}PING & 抖动${NC}           ${WHITE}⬆️ TCP上行带宽${NC}           ${WHITE}⬇️ TCP下行带宽${NC}"
     echo -e "─────────────────────  ─────────────────────  ─────────────────────"
 
     # 第一行数据
@@ -2086,42 +2062,24 @@ generate_final_report() {
 
     # 第四行数据
     if [ "$HPING_SUCCESS" = true ] && [ -n "${TEST_RESULTS[latency_jitter]}" ]; then
-        printf "  抖动: ${YELLOW}%-12s${NC}  " "${TEST_RESULTS[latency_jitter]}ms"
-    else
-        printf "  %-21s  " ""
-    fi
-
-    if [ "$TCP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_up_congestion]}" ]; then
-        # 格式化拥塞控制算法显示
-        local up_congestion_short=$(echo "${TEST_RESULTS[tcp_up_congestion]}" | sed 's/(发) /发/; s/ > (收) / \/ 收/')
-        printf "  拥塞: ${YELLOW}%-15s${NC}  " "$up_congestion_short"
-    else
-        printf "  %-21s  " ""
-    fi
-
-    # TCP下行拥塞控制算法
-    if [ "$TCP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_down_congestion]}" ]; then
-        local down_congestion_short=$(echo "${TEST_RESULTS[tcp_down_congestion]}" | sed 's/(发) /发/; s/ > (收) / \/ 收/')
-        printf "  拥塞: ${YELLOW}%-15s${NC}\n" "$down_congestion_short"
+        printf "  抖动: ${YELLOW}%-12s${NC}\n" "${TEST_RESULTS[latency_jitter]}ms"
     else
         printf "  %-21s\n" ""
     fi
     echo ""
 
-    # UDP协议性能详情
-    echo -e "${WHITE}UDP 协议性能详情${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
     echo -e " 方向     │ 吞吐量                    │ 丢包率        │ 抖动"
     echo -e "─────────────────────────────────────────────────────────────────"
 
     # UDP上行
     if [ "$UDP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_up_speed_mbps]}" ]; then
-        printf " ⬆️ 上行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
+        printf " ⬆️ UDP上行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
             "${TEST_RESULTS[udp_up_speed_mbps]} Mbps (${TEST_RESULTS[udp_up_speed_mibs]} MB/s)" \
             "${TEST_RESULTS[udp_up_loss]}" \
             "${TEST_RESULTS[udp_up_jitter]} ms"
     else
-        printf " ⬆️ 上行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
+        printf " ⬆️ UDP上行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
             "测试失败" "N/A" "N/A"
     fi
 
