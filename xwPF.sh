@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.6.1"
+SCRIPT_VERSION="v1.6.5"
 
 # 全局变量声明
 ROLE=""
@@ -11,9 +11,7 @@ NAT_THROUGH_IP="::"
 REMOTE_IP=""
 REMOTE_PORT=""
 EXIT_LISTEN_PORT=""
-FORWARD_IP=""
-FORWARD_PORT=""
-FORWARD_TARGET=""  #支持多地址和域名
+FORWARD_TARGET=""  # 支持多地址和域名
 
 # 配置变量
 SECURITY_LEVEL=""  # 传输模式：standard, ws, tls_self, tls_ca, ws_tls_self, ws_tls_ca
@@ -24,6 +22,46 @@ WS_PATH=""         # WebSocket路径
 
 RULE_ID=""
 RULE_NAME=""
+
+# 依赖工具列表（统一管理）
+REQUIRED_TOOLS=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
+
+# 通用的字段初始化函数
+init_rule_field() {
+    local field_name="$1"
+    local default_value="$2"
+
+    if [ ! -d "$RULES_DIR" ]; then
+        return 0
+    fi
+
+    for rule_file in "${RULES_DIR}"/rule-*.conf; do
+        if [ -f "$rule_file" ]; then
+            # 检查是否已有该字段
+            if ! grep -q "^${field_name}=" "$rule_file"; then
+                echo "${field_name}=\"${default_value}\"" >> "$rule_file"
+            fi
+        fi
+    done
+}
+
+# 通用的服务重启后确认函数
+restart_and_confirm() {
+    local operation_name="$1"
+    local batch_mode="$2"
+
+    if [ "$batch_mode" != "batch" ]; then
+        echo -e "${YELLOW}正在重启服务以应用${operation_name}...${NC}"
+        if service_restart; then
+            echo -e "${GREEN}✓ 服务重启成功，${operation_name}已生效${NC}"
+            return 0
+        else
+            echo -e "${RED}✗ 服务重启失败，请检查配置${NC}"
+            return 1
+        fi
+    fi
+    return 0
+}
 
 # 颜色定义
 RED='\033[0;31m'      # 错误、危险、禁用状态
@@ -58,13 +96,95 @@ LOG_PATH="/var/log/realm.log"
 # 转发配置管理路径
 RULES_DIR="${CONFIG_DIR}/rules"
 
-# 默认伪装域名（双端realm搭建隧道需要相同SNI）
+# 默认tls域名（双端realm搭建隧道需要相同SNI）
 DEFAULT_SNI_DOMAIN="www.tesla.com"
 
-# 获取默认伪装域名（双端realm搭建隧道需要相同SNI）
-get_random_mask_domain() {
-    echo "$DEFAULT_SNI_DOMAIN"
+# 统一的realm配置模板（避免重复定义）
+generate_base_config_template() {
+    cat <<EOF
+{
+    "log": {
+        "level": "warn",
+        "output": "${LOG_PATH}"
+    },
+    "dns": {
+        "mode": "ipv4_and_ipv6",
+        "nameservers": [
+            "1.1.1.1:53",
+            "8.8.8.8:53",
+            "[2606:4700:4700::1111]:53",
+            "[2001:4860:4860::8888]:53"
+        ],
+        "protocol": "tcp_and_udp",
+        "min_ttl": 600,
+        "max_ttl": 1800,
+        "cache_size": 256
+    },
+    "network": {
+        "no_tcp": false,
+        "use_udp": true,
+        "tcp_timeout": 5,
+        "udp_timeout": 30,
+        "tcp_keepalive": 12,
+        "tcp_keepalive_probe": 3
+    }
 }
+EOF
+}
+
+# 生成完整的realm配置文件（使用统一模板）
+generate_complete_config() {
+    local endpoints="$1"
+    local config_path="${2:-$CONFIG_PATH}"
+
+    # 获取基础配置模板
+    local base_config=$(generate_base_config_template)
+
+    # 移除基础配置的结尾大括号，准备添加endpoints
+    base_config=$(echo "$base_config" | sed '$d')
+
+    # 生成完整配置
+    cat > "$config_path" <<EOF
+$base_config,
+    "endpoints": [$endpoints
+    ]
+}
+EOF
+}
+
+# 生成传统单endpoint配置（向后兼容）
+generate_legacy_single_config() {
+    local listen="$1"
+    local remote="$2"
+    local through="$3"
+    local transport_config="$4"
+    local config_path="${5:-$CONFIG_PATH}"
+
+    # 构建endpoint配置
+    local endpoint_config="
+        {
+            \"listen\": \"$listen\",
+            \"remote\": \"$remote\""
+
+    # 添加through配置（如果存在且不为::）
+    if [ -n "$through" ] && [ "$through" != "::" ]; then
+        endpoint_config="$endpoint_config,
+            \"through\": \"$through\""
+    fi
+
+    # 添加传输配置（如果存在）
+    if [ -n "$transport_config" ]; then
+        endpoint_config="$endpoint_config,
+            $transport_config"
+    fi
+
+    endpoint_config="$endpoint_config
+        }"
+
+    # 使用统一模板生成配置
+    generate_complete_config "$endpoint_config" "$config_path"
+}
+
 
 # 检查root权限
 check_root() {
@@ -103,18 +223,16 @@ check_netcat_openbsd() {
     return $?
 }
 
-# 安装依赖工具
-install_dependencies() {
+# 统一的依赖管理函数
+manage_dependencies() {
+    local mode="$1"  # "check" 或 "install"
     local missing_tools=()
-    local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
 
-    echo -e "${YELLOW}正在检查必备依赖工具...${NC}"
-
-    # 检查缺失的工具
-    for tool in "${tools_to_check[@]}"; do
+    # 检查基础工具
+    for tool in "${REQUIRED_TOOLS[@]}"; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing_tools+=("$tool")
-        else
+        elif [ "$mode" = "install" ]; then
             echo -e "${GREEN}✓${NC} $tool 已安装"
         fi
     done
@@ -122,61 +240,56 @@ install_dependencies() {
     # 单独检查netcat-openbsd版本
     if ! check_netcat_openbsd; then
         missing_tools+=("nc")
-        echo -e "${YELLOW}✗${NC} nc 需要安装netcat-openbsd版本"
-    else
+        if [ "$mode" = "install" ]; then
+            echo -e "${YELLOW}✗${NC} nc 需要安装netcat-openbsd版本"
+        fi
+    elif [ "$mode" = "install" ]; then
         echo -e "${GREEN}✓${NC} nc (netcat-openbsd) 已安装"
     fi
 
-    # 如果有缺失的工具，自动安装
+    # 处理缺失的工具
     if [ ${#missing_tools[@]} -gt 0 ]; then
-        echo -e "${YELLOW}需要安装以下工具: ${missing_tools[*]}${NC}"
+        if [ "$mode" = "check" ]; then
+            echo -e "${RED}错误: 缺少必备工具: ${missing_tools[*]}${NC}"
+            echo -e "${YELLOW}请先选择菜单选项1进行安装，或手动运行安装命令:${NC}"
+            echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
+            exit 1
+        elif [ "$mode" = "install" ]; then
+            echo -e "${YELLOW}需要安装以下工具: ${missing_tools[*]}${NC}"
+            echo -e "${BLUE}使用 apt-get 安装依赖,下载中...${NC}"
+            apt-get update -qq >/dev/null 2>&1
 
-        # 使用 apt-get 安装依赖
-        echo -e "${BLUE}使用 apt-get 安装依赖,下载中...${NC}"
-        apt-get update -qq >/dev/null 2>&1
-        for tool in "${missing_tools[@]}"; do
-            case "$tool" in
-                "curl") apt-get install -y curl >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} curl 安装成功" ;;
-                "wget") apt-get install -y wget >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} wget 安装成功" ;;
-                "tar") apt-get install -y tar >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} tar 安装成功" ;;
-                "systemctl") apt-get install -y systemd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} systemd 安装成功" ;;
-                "bc") apt-get install -y bc >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} bc 安装成功" ;;
-                "nc")
-                    # 确保安装正确的netcat版本
-                    apt-get remove -y netcat-traditional >/dev/null 2>&1
-                    apt-get install -y netcat-openbsd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} nc (netcat-openbsd) 安装成功"
-                    ;;
-            esac
-        done
-    else
+            for tool in "${missing_tools[@]}"; do
+                case "$tool" in
+                    "curl") apt-get install -y curl >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} curl 安装成功" ;;
+                    "wget") apt-get install -y wget >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} wget 安装成功" ;;
+                    "tar") apt-get install -y tar >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} tar 安装成功" ;;
+                    "systemctl") apt-get install -y systemd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} systemd 安装成功" ;;
+                    "bc") apt-get install -y bc >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} bc 安装成功" ;;
+                    "nc")
+                        # 确保安装正确的netcat版本
+                        apt-get remove -y netcat-traditional >/dev/null 2>&1
+                        apt-get install -y netcat-openbsd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} nc (netcat-openbsd) 安装成功"
+                        ;;
+                esac
+            done
+        fi
+    elif [ "$mode" = "install" ]; then
         echo -e "${GREEN}所有必备工具已安装完成${NC}"
     fi
-    echo ""
+
+    [ "$mode" = "install" ] && echo ""
 }
 
-# 检查必备依赖工具
+# 安装依赖工具（向后兼容）
+install_dependencies() {
+    echo -e "${YELLOW}正在检查必备依赖工具...${NC}"
+    manage_dependencies "install"
+}
+
+# 检查必备依赖工具（向后兼容）
 check_dependencies() {
-    local missing_tools=()
-    local tools_to_check=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
-
-    # 检查基础工具
-    for tool in "${tools_to_check[@]}"; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            missing_tools+=("$tool")
-        fi
-    done
-
-    # 单独检查netcat-openbsd
-    if ! check_netcat_openbsd; then
-        missing_tools+=("nc")
-    fi
-
-    if [ ${#missing_tools[@]} -gt 0 ]; then
-        echo -e "${RED}错误: 缺少必备工具: ${missing_tools[*]}${NC}"
-        echo -e "${YELLOW}请先选择菜单选项1进行安装，或手动运行安装命令:${NC}"
-        echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
-        exit 1
-    fi
+    manage_dependencies "check"
 }
 
 # 获取本机公网IP
@@ -230,10 +343,6 @@ REMOTE_PORT=$REMOTE_PORT
 EXIT_LISTEN_PORT=$EXIT_LISTEN_PORT
 FORWARD_TARGET=$FORWARD_TARGET
 
-# 兼容性：保留旧格式（如果存在）
-FORWARD_IP=$FORWARD_IP
-FORWARD_PORT=$FORWARD_PORT
-
 # 新增配置选项
 SECURITY_LEVEL=$SECURITY_LEVEL
 TLS_CERT_PATH=$TLS_CERT_PATH
@@ -262,19 +371,10 @@ read_manager_conf() {
         exit 1
     fi
 
-    # 兼容性处理：如果没有新格式，从旧格式转换
-    if [ -z "$FORWARD_TARGET" ] && [ -n "$FORWARD_IP" ] && [ -n "$FORWARD_PORT" ]; then
-        FORWARD_TARGET="$FORWARD_IP:$FORWARD_PORT"
-    fi
-
-    # 解析转发目标为IP和端口（用于向后兼容）
-    if [ -n "$FORWARD_TARGET" ] && [ -z "$FORWARD_IP" ]; then
-        # 提取第一个地址作为主要地址（向后兼容）
-        local first_target=$(echo "$FORWARD_TARGET" | cut -d',' -f1)
-        if [[ "$first_target" == *":"* ]]; then
-            FORWARD_IP=$(echo "$first_target" | cut -d':' -f1)
-            FORWARD_PORT=$(echo "$first_target" | cut -d':' -f2)
-        fi
+    # 向后兼容：确保FORWARD_TARGET存在
+    if [ -z "$FORWARD_TARGET" ]; then
+        # 如果配置文件中没有FORWARD_TARGET，可能是旧版本配置
+        echo -e "${YELLOW}检测到旧版本配置格式，请重新配置转发规则${NC}"
     fi
 }
 
@@ -564,20 +664,12 @@ manage_log_size() {
 }
 
 
-# 获取中转服务器监听IP（用户动态输入）
-get_nat_server_listen_ip() {
-    echo "${NAT_LISTEN_IP:-::}"
-}
 
-# 获取落地服务器监听IP（固定为双栈监听）
-get_exit_server_listen_ip() {
-    echo "::"
-}
 
 # 生成转发endpoints配置
 generate_forward_endpoints_config() {
-    local target="${FORWARD_TARGET:-$FORWARD_IP:$FORWARD_PORT}"
-    local listen_ip=$(get_exit_server_listen_ip)
+    local target="$FORWARD_TARGET"
+    local listen_ip="::"
 
     # 获取传输配置（出口服务器角色=2）
     local transport_config=$(get_transport_config "$SECURITY_LEVEL" "$TLS_SERVER_NAME" "$TLS_CERT_PATH" "$TLS_KEY_PATH" "2" "$WS_PATH")
@@ -611,20 +703,18 @@ generate_forward_endpoints_config() {
         \"extra_remotes\": [$extra_addresses]"
         fi
 
-        echo "\"endpoints\": [
+        echo "
         {
             \"listen\": \"${listen_ip}:${EXIT_LISTEN_PORT}\",
             \"remote\": \"${main_address}\"${extra_addresses}${transport_line}
-        }
-    ]"
+        }"
     else
         # 单地址配置
-        echo "\"endpoints\": [
+        echo "
         {
             \"listen\": \"${listen_ip}:${EXIT_LISTEN_PORT}\",
             \"remote\": \"${target}\"${transport_line}
-        }
-    ]"
+        }"
     fi
 }
 
@@ -921,11 +1011,11 @@ list_all_rules() {
                 # 根据规则角色显示不同的转发信息
                 if [ "$RULE_ROLE" = "2" ]; then
                     # 落地服务器使用FORWARD_TARGET
-                    local display_ip=$(get_exit_server_listen_ip)
+                    local display_ip="::"
                     echo -e "  监听: ${GREEN}${LISTEN_IP:-$display_ip}:$LISTEN_PORT${NC} → 转发: ${GREEN}$FORWARD_TARGET${NC}"
                 else
                     # 中转服务器使用REMOTE_HOST:REMOTE_PORT，显示格式：中转: 监听IP:端口 → 出口IP → 目标IP:端口
-                    local display_ip=$(get_nat_server_listen_ip)
+                    local display_ip="${NAT_LISTEN_IP:-::}"
                     local through_display="${THROUGH_IP:-::}"
                     echo -e "  中转: ${GREEN}${LISTEN_IP:-$display_ip}:$LISTEN_PORT${NC} → ${GREEN}$through_display${NC} → ${GREEN}$REMOTE_HOST:$REMOTE_PORT${NC}"
                 fi
@@ -1013,7 +1103,7 @@ RULE_NAME="中转"
 RULE_ROLE="1"
 SECURITY_LEVEL="$SECURITY_LEVEL"
 LISTEN_PORT="$NAT_LISTEN_PORT"
-LISTEN_IP="$(get_nat_server_listen_ip)"
+LISTEN_IP="${NAT_LISTEN_IP:-::}"
 THROUGH_IP="$NAT_THROUGH_IP"
 REMOTE_HOST="$REMOTE_IP"
 REMOTE_PORT="$REMOTE_PORT"
@@ -1451,9 +1541,8 @@ import_config_package() {
     echo -e "${YELLOW}=== 导入配置包 ===${NC}"
     echo ""
 
-    # 直接让用户输入配置包路径
-    echo -e "${BLUE}请输入配置包的完整路径：${NC}"
-    read -p "路径: " package_path
+    # 输入配置包路径
+    read -p "请输入配置包的完整路径：" package_path
     echo ""
 
     if [ -z "$package_path" ]; then
@@ -1665,7 +1754,7 @@ rules_management_menu() {
                             local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                             local display_target=$(smart_display_target "$REMOTE_HOST")
                             local rule_display_name="$RULE_NAME"
-                            local display_ip=$(get_nat_server_listen_ip)
+                            local display_ip="${NAT_LISTEN_IP:-::}"
                             local through_display="${THROUGH_IP:-::}"
                             echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                             local note_display=""
@@ -1715,7 +1804,7 @@ rules_management_menu() {
                             local target_port="${FORWARD_TARGET##*:}"
                             local display_target=$(smart_display_target "$target_host")
                             local rule_display_name="$RULE_NAME"
-                            local display_ip=$(get_exit_server_listen_ip)
+                            local display_ip="::"
                             echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                             local note_display=""
                             if [ -n "$RULE_NOTE" ]; then
@@ -1773,7 +1862,7 @@ rules_management_menu() {
         echo ""
 
         echo "请选择操作:"
-        echo -e "${GREEN}1.${NC} 配置文件管理"
+        echo -e "${GREEN}1.${NC} 一键导出/导入配置"
         echo -e "${GREEN}2.${NC} 添加新配置"
         echo -e "${GREEN}3.${NC} 删除配置"
         echo -e "${GREEN}4.${NC} 启用/禁用中转规则"
@@ -1788,7 +1877,7 @@ rules_management_menu() {
 
         case $choice in
             1)
-                # 配置文件管理子菜单
+                # 一键导出/导入配置管理
                 while true; do
                     clear
                     echo -e "${GREEN}=== 配置文件管理 ===${NC}"
@@ -2443,12 +2532,12 @@ list_rules_for_mptcp_management() {
                     local target_host="${FORWARD_TARGET%:*}"
                     local target_port="${FORWARD_TARGET##*:}"
                     local display_target=$(smart_display_target "$target_host")
-                    local display_ip=$(get_exit_server_listen_ip)
+                    local display_ip="::"
                     echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                 else
                     # 中转服务器使用REMOTE_HOST
                     local display_target=$(smart_display_target "$REMOTE_HOST")
-                    local display_ip=$(get_nat_server_listen_ip)
+                    local display_ip="${NAT_LISTEN_IP:-::}"
                     local through_display="${THROUGH_IP:-::}"
                     echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                 fi
@@ -2617,16 +2706,9 @@ set_mptcp_mode() {
     if [ $? -eq 0 ]; then
         if [ "$batch_mode" != "batch" ]; then
             echo -e "${GREEN}✓ MPTCP模式已更新为: ${mode_color}$mode_display${NC}"
-
-            # 重启服务以应用更改
-            echo -e "${YELLOW}正在重启服务以应用MPTCP配置...${NC}"
-            if service_restart; then
-                echo -e "${GREEN}✓ 服务重启成功，MPTCP配置已生效${NC}"
-            else
-                echo -e "${RED}✗ 服务重启失败，请检查配置${NC}"
-            fi
         fi
-        return 0
+        restart_and_confirm "MPTCP配置" "$batch_mode"
+        return $?
     else
         if [ "$batch_mode" != "batch" ]; then
             echo -e "${RED}✗ 更新MPTCP模式失败${NC}"
@@ -2639,18 +2721,7 @@ set_mptcp_mode() {
 
 # 初始化所有规则文件的MPTCP字段（确保向后兼容）
 init_mptcp_fields() {
-    if [ ! -d "$RULES_DIR" ]; then
-        return 0
-    fi
-
-    for rule_file in "${RULES_DIR}"/rule-*.conf; do
-        if [ -f "$rule_file" ]; then
-            # 检查是否已有MPTCP_MODE字段
-            if ! grep -q "^MPTCP_MODE=" "$rule_file"; then
-                echo "MPTCP_MODE=\"off\"" >> "$rule_file"
-            fi
-        fi
-    done
+    init_rule_field "MPTCP_MODE" "off"
 }
 
 # 添加MPTCP端点
@@ -3082,18 +3153,7 @@ get_proxy_mode_color() {
 
 # 初始化所有规则文件的Proxy字段（确保向后兼容）
 init_proxy_fields() {
-    if [ ! -d "$RULES_DIR" ]; then
-        return 0
-    fi
-
-    for rule_file in "${RULES_DIR}"/rule-*.conf; do
-        if [ -f "$rule_file" ]; then
-            # 检查是否已有PROXY_MODE字段
-            if ! grep -q "^PROXY_MODE=" "$rule_file"; then
-                echo "PROXY_MODE=\"off\"" >> "$rule_file"
-            fi
-        fi
-    done
+    init_rule_field "PROXY_MODE" "off"
 }
 
 # Proxy管理主菜单
@@ -3215,12 +3275,12 @@ list_rules_for_proxy_management() {
                     local target_host="${FORWARD_TARGET%:*}"
                     local target_port="${FORWARD_TARGET##*:}"
                     local display_target=$(smart_display_target "$target_host")
-                    local display_ip=$(get_exit_server_listen_ip)
+                    local display_ip="::"
                     echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                 else
                     # 中转服务器使用REMOTE_HOST
                     local display_target=$(smart_display_target "$REMOTE_HOST")
-                    local display_ip=$(get_nat_server_listen_ip)
+                    local display_ip="${NAT_LISTEN_IP:-::}"
                     local through_display="${THROUGH_IP:-::}"
                     echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                 fi
@@ -3998,9 +4058,9 @@ toggle_target_server() {
                 local balance_info=$(get_balance_info_display "$REMOTE_HOST" "$balance_mode")
 
                 if [ "$RULE_ROLE" = "2" ]; then
-                    local display_ip=$(get_exit_server_listen_ip)
+                    local display_ip="::"
                 else
-                    local display_ip=$(get_nat_server_listen_ip)
+                    local display_ip="${NAT_LISTEN_IP:-::}"
                 fi
                 local through_display="${THROUGH_IP:-::}"
                 echo -e "  ID ${BLUE}$RULE_ID${NC}: ${GREEN}$RULE_NAME${NC} (${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT) [${status_color}$status_text${NC}]$balance_info"
@@ -4357,8 +4417,7 @@ configure_nat_server() {
                 echo ""
                 read -p "请输入TLS服务器名称 (SNI) [默认www.tesla.com]: " TLS_SERVER_NAME
                 if [ -z "$TLS_SERVER_NAME" ]; then
-                    TLS_SERVER_NAME=$(get_random_mask_domain)
-                    echo -e "${GREEN}已设置默认伪装域名: $TLS_SERVER_NAME${NC}"
+                    TLS_SERVER_NAME="$DEFAULT_SNI_DOMAIN"
                 fi
                 echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
                 break
@@ -4399,8 +4458,7 @@ configure_nat_server() {
                 echo ""
                 read -p "请输入TLS服务器名称 (SNI) [默认www.tesla.com]: " TLS_SERVER_NAME
                 if [ -z "$TLS_SERVER_NAME" ]; then
-                    TLS_SERVER_NAME=$(get_random_mask_domain)
-                    echo -e "${GREEN}已设置默认伪装域名: $TLS_SERVER_NAME${NC}"
+                    TLS_SERVER_NAME="$DEFAULT_SNI_DOMAIN"
                 fi
                 echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
 
@@ -4554,10 +4612,11 @@ configure_exit_server() {
     done
 
     # 转发目标端口配置
+    local forward_port
     while true; do
-        read -p "转发目标端口(业务端口): " FORWARD_PORT
-        if validate_port "$FORWARD_PORT"; then
-            echo -e "${GREEN}转发端口设置为: $FORWARD_PORT${NC}"
+        read -p "转发目标端口(业务端口): " forward_port
+        if validate_port "$forward_port"; then
+            echo -e "${GREEN}转发端口设置为: $forward_port${NC}"
             break
         else
             echo -e "${RED}无效端口号，请输入 1-65535 之间的数字${NC}"
@@ -4565,7 +4624,7 @@ configure_exit_server() {
     done
 
     # 组合完整的转发目标（包含端口）
-    FORWARD_TARGET="$FORWARD_TARGET:$FORWARD_PORT"
+    FORWARD_TARGET="$FORWARD_TARGET:$forward_port"
 
     # 测试转发目标连通性
     echo -e "${YELLOW}正在测试转发目标连通性...${NC}"
@@ -4573,14 +4632,15 @@ configure_exit_server() {
 
     # 解析并测试每个地址
     local addresses_part="${FORWARD_TARGET%:*}"
+    local target_port="${FORWARD_TARGET##*:}"
     IFS=',' read -ra TARGET_ADDRESSES <<< "$addresses_part"
     for addr in "${TARGET_ADDRESSES[@]}"; do
         addr=$(echo "$addr" | xargs)  # 去除空格
-        echo -e "${BLUE}测试连接: $addr:$FORWARD_PORT${NC}"
-        if check_connectivity "$addr" "$FORWARD_PORT"; then
-            echo -e "${GREEN}✓ $addr:$FORWARD_PORT 连接成功${NC}"
+        echo -e "${BLUE}测试连接: $addr:$target_port${NC}"
+        if check_connectivity "$addr" "$target_port"; then
+            echo -e "${GREEN}✓ $addr:$target_port 连接成功${NC}"
         else
-            echo -e "${RED}✗ $addr:$FORWARD_PORT 连接失败${NC}"
+            echo -e "${RED}✗ $addr:$target_port 连接失败${NC}"
             connectivity_ok=false
         fi
     done
@@ -4615,8 +4675,7 @@ configure_exit_server() {
         echo -e "${GREEN}✓ 所有转发目标连接测试成功！${NC}"
     fi
 
-    # 设置兼容性变量（用于旧代码）
-    FORWARD_IP=$(echo "${TARGET_ADDRESSES[0]}" | xargs)
+    # 已移除FORWARD_IP兼容性变量，统一使用FORWARD_TARGET
 
     # 传输模式选择
     echo ""
@@ -4658,8 +4717,7 @@ configure_exit_server() {
                 echo ""
                 read -p "请输入TLS服务器名称 (SNI) [默认www.tesla.com]: " TLS_SERVER_NAME
                 if [ -z "$TLS_SERVER_NAME" ]; then
-                    TLS_SERVER_NAME=$(get_random_mask_domain)
-                    echo -e "${GREEN}已设置默认伪装域名: $TLS_SERVER_NAME${NC}"
+                    TLS_SERVER_NAME="$DEFAULT_SNI_DOMAIN"
                 fi
                 echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
                 break
@@ -4672,8 +4730,7 @@ configure_exit_server() {
                 echo ""
                 read -p "请输入TLS服务器名称 (SNI) [默认www.tesla.com]: " TLS_SERVER_NAME
                 if [ -z "$TLS_SERVER_NAME" ]; then
-                    TLS_SERVER_NAME=$(get_random_mask_domain)
-                    echo -e "${GREEN}已设置默认伪装域名: $TLS_SERVER_NAME${NC}"
+                    TLS_SERVER_NAME="$DEFAULT_SNI_DOMAIN"
                 fi
                 echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
                 break
@@ -4714,8 +4771,7 @@ configure_exit_server() {
                 echo ""
                 read -p "请输入TLS服务器名称 (SNI) [默认www.tesla.com]: " TLS_SERVER_NAME
                 if [ -z "$TLS_SERVER_NAME" ]; then
-                    TLS_SERVER_NAME=$(get_random_mask_domain)
-                    echo -e "${GREEN}已设置默认伪装域名: $TLS_SERVER_NAME${NC}"
+                    TLS_SERVER_NAME="$DEFAULT_SNI_DOMAIN"
                 fi
                 echo -e "${GREEN}TLS服务器名称设置为: $TLS_SERVER_NAME${NC}"
 
@@ -5023,18 +5079,9 @@ find_script_locations_enhanced() {
     printf '%s\n' "${final_locations[@]}"
 }
 
-# 获取最佳脚本工作目录
-get_best_script_dir() {
-    local locations=($(find_script_locations_enhanced))
 
-    echo "${locations[0]}"
-}
 
-# 清理缓存函数
-clear_script_location_cache() {
-    rm -f "/tmp/xwPF_script_locations_cache"
-    echo -e "${GREEN}✓ 脚本位置缓存已清理${NC}"
-}
+
 
 # 确定工作目录 - 统一逻辑
 get_work_dir() {
@@ -5341,7 +5388,8 @@ install_realm() {
 
     # 检测本地压缩包
     echo -e "${YELLOW}检测本地 realm 压缩包...${NC}"
-    local script_dir=$(get_best_script_dir)
+    local locations=($(find_script_locations_enhanced))
+    local script_dir="${locations[0]}"
     echo -e "${BLUE}脚本工作目录: $script_dir${NC}"
 
     local local_packages=($(find "$script_dir" -maxdepth 1 -name "realm-*.tar.gz" -o -name "realm-*.zip" 2>/dev/null))
@@ -5472,13 +5520,13 @@ generate_rule_endpoint_config() {
 
         endpoint_config="
         {
-            \"listen\": \"${LISTEN_IP:-$(get_nat_server_listen_ip)}:${listen_port}\",
+            \"listen\": \"${LISTEN_IP:-${NAT_LISTEN_IP:-::}}:${listen_port}\",
             \"remote\": \"${enabled_addresses[0]}:${remote_port}\"${extra_addresses}"
     else
         # 单地址配置
         endpoint_config="
         {
-            \"listen\": \"${LISTEN_IP:-$(get_nat_server_listen_ip)}:${listen_port}\",
+            \"listen\": \"${LISTEN_IP:-${NAT_LISTEN_IP:-::}}:${listen_port}\",
             \"remote\": \"${remote_host}:${remote_port}\""
     fi
 
@@ -5592,7 +5640,7 @@ find_file_path() {
         fi
     done
 
-    # 第三阶段：全系统搜索（最后手段）
+    # 第三阶段：全系统搜索
     local found_path=""
     if command -v timeout >/dev/null 2>&1; then
         found_path=$(timeout 10 find / -name "$filename" -type f 2>/dev/null | head -1)
@@ -5664,10 +5712,10 @@ generate_endpoints_from_rules() {
                     local default_listen_ip
                     if [ "$RULE_ROLE" = "2" ]; then
                         # 落地服务器使用双栈监听
-                        default_listen_ip=$(get_exit_server_listen_ip)
+                        default_listen_ip="::"
                     else
                         # 中转服务器使用动态输入的IP
-                        default_listen_ip=$(get_nat_server_listen_ip)
+                        default_listen_ip="${NAT_LISTEN_IP:-::}"
                     fi
                     port_configs[$port_key]="$SECURITY_LEVEL|$TLS_SERVER_NAME|$TLS_CERT_PATH|$TLS_KEY_PATH|$BALANCE_MODE|${LISTEN_IP:-$default_listen_ip}|$THROUGH_IP"
                     # 存储权重配置和角色信息
@@ -5825,10 +5873,10 @@ generate_endpoints_from_rules() {
             local role="${port_roles[$port_key]:-1}"
             if [ "$role" = "2" ]; then
                 # 落地服务器使用双栈监听
-                listen_ip=$(get_exit_server_listen_ip)
+                listen_ip="::"
             else
                 # 中转服务器使用动态输入的IP
-                listen_ip=$(get_nat_server_listen_ip)
+                listen_ip="${NAT_LISTEN_IP:-::}"
             fi
         fi
 
@@ -6087,33 +6135,8 @@ generate_realm_config() {
             return $?
         else
             echo -e "${BLUE}未找到启用的规则，生成空配置${NC}"
-            # 生成空配置
-            cat > "$CONFIG_PATH" <<EOF
-{
-    "dns": {
-        "mode": "ipv4_and_ipv6",
-        "nameservers": [
-            "1.1.1.1:53",
-            "8.8.8.8:53",
-            "[2606:4700:4700::1111]:53",
-            "[2001:4860:4860::8888]:53"
-        ],
-        "protocol": "tcp_and_udp",
-        "min_ttl": 600,
-        "max_ttl": 1800,
-        "cache_size": 256
-    },
-    "network": {
-        "no_tcp": false,
-        "use_udp": true,
-        "tcp_timeout": 5,
-        "udp_timeout": 30,
-        "tcp_keepalive": 12,
-        "tcp_keepalive_probe": 3
-    },
-    "endpoints": []
-}
-EOF
+            # 使用统一模板生成空配置
+            generate_complete_config ""
             echo -e "${GREEN}✓ 空配置文件已生成${NC}"
             return 0
         fi
@@ -6125,40 +6148,8 @@ EOF
     # 获取所有启用规则的endpoints
     local endpoints=$(generate_endpoints_from_rules)
 
-
-
-    # 生成最终配置文件
-    cat > "$CONFIG_PATH" <<EOF
-{
-    "log": {
-        "level": "warn",
-        "output": "${LOG_PATH}"
-    },
-    "dns": {
-        "mode": "ipv4_and_ipv6",
-        "nameservers": [
-            "1.1.1.1:53",
-            "8.8.8.8:53",
-            "[2606:4700:4700::1111]:53",
-            "[2001:4860:4860::8888]:53"
-        ],
-        "protocol": "tcp_and_udp",
-        "min_ttl": 600,
-        "max_ttl": 1800,
-        "cache_size": 256
-    },
-    "network": {
-        "no_tcp": false,
-        "use_udp": true,
-        "tcp_timeout": 5,
-        "udp_timeout": 30,
-        "tcp_keepalive": 12,
-        "tcp_keepalive_probe": 3
-    },
-    "endpoints": [$endpoints
-    ]
-}
-EOF
+    # 使用统一模板生成多规则配置
+    generate_complete_config "$endpoints"
 
     echo -e "${GREEN}✓ 多规则配置文件已生成${NC}"
     echo -e "${BLUE}配置详情: $enabled_count 个启用的转发规则${NC}"
@@ -6173,12 +6164,12 @@ EOF
                     local target_host="${FORWARD_TARGET%:*}"
                     local target_port="${FORWARD_TARGET##*:}"
                     local display_target=$(smart_display_target "$target_host")
-                    local display_ip=$(get_exit_server_listen_ip)
+                    local display_ip="::"
                     echo -e "  ${GREEN}$RULE_NAME${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                 else
                     # 中转服务器使用REMOTE_HOST
                     local display_target=$(smart_display_target "$REMOTE_HOST")
-                    local display_ip=$(get_nat_server_listen_ip)
+                    local display_ip="${NAT_LISTEN_IP:-::}"
                     local through_display="${THROUGH_IP:-::}"
                     echo -e "  ${GREEN}$RULE_NAME${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                 fi
@@ -6202,45 +6193,15 @@ generate_legacy_config() {
             $transport_config"
         fi
 
-        cat > "$CONFIG_PATH" <<EOF
-{
-    "log": {
-        "level": "warn",
-        "output": "${LOG_PATH}"
-    },
-    "dns": {
-        "mode": "ipv4_and_ipv6",
-        "nameservers": [
-            "1.1.1.1:53",
-            "8.8.8.8:53",
-            "[2606:4700:4700::1111]:53",
-            "[2001:4860:4860::8888]:53"
-        ],
-        "protocol": "tcp_and_udp",
-        "min_ttl": 600,
-        "max_ttl": 1800,
-        "cache_size": 256
-    },
-    "network": {
-        "no_tcp": false,
-        "use_udp": true,
-        "tcp_timeout": 5,
-        "udp_timeout": 30,
-        "tcp_keepalive": 12,
-        "tcp_keepalive_probe": 3
-    },
-    "endpoints": [
-        {
-            "listen": "${NAT_LISTEN_IP}:${NAT_LISTEN_PORT}",
-            "remote": "${REMOTE_IP}:${REMOTE_PORT}"$([ -n "$NAT_THROUGH_IP" ] && [ "$NAT_THROUGH_IP" != "::" ] && echo ",
-            \"through\": \"$NAT_THROUGH_IP\"" || echo "")${transport_line}
-        }
-    ]
-}
-EOF
+        # 使用统一模板生成中转服务器配置
+        generate_legacy_single_config \
+            "${NAT_LISTEN_IP}:${NAT_LISTEN_PORT}" \
+            "${REMOTE_IP}:${REMOTE_PORT}" \
+            "$NAT_THROUGH_IP" \
+            "$transport_config"
         echo -e "${GREEN}✓ 中转服务器配置文件已生成${NC}"
         echo -e "${BLUE}配置详情:${NC}"
-        local display_ip=$(get_nat_server_listen_ip)
+        local display_ip="${NAT_LISTEN_IP:-::}"
         echo -e "  监听地址: ${GREEN}${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT${NC}"
         echo -e "  转发到: ${GREEN}$REMOTE_IP:$REMOTE_PORT${NC}"
 
@@ -6248,40 +6209,12 @@ EOF
         # 出口服务器配置（双端Realm搭建隧道）
         local endpoints_config=$(generate_forward_endpoints_config)
 
-        cat > "$CONFIG_PATH" <<EOF
-{
-    "log": {
-        "level": "warn",
-        "output": "${LOG_PATH}"
-    },
-    "dns": {
-        "mode": "ipv4_and_ipv6",
-        "nameservers": [
-            "1.1.1.1:53",
-            "8.8.8.8:53",
-            "[2606:4700:4700::1111]:53",
-            "[2001:4860:4860::8888]:53"
-        ],
-        "protocol": "tcp_and_udp",
-        "min_ttl": 600,
-        "max_ttl": 1800,
-        "cache_size": 256
-    },
-    "network": {
-        "no_tcp": false,
-        "use_udp": true,
-        "tcp_timeout": 5,
-        "udp_timeout": 30,
-        "tcp_keepalive": 12,
-        "tcp_keepalive_probe": 3
-    },
-    $endpoints_config
-}
-EOF
+        # 使用统一模板生成出口服务器配置
+        generate_complete_config "$endpoints_config"
         echo -e "${GREEN}✓ 出口服务器配置文件已生成${NC}"
         echo -e "${BLUE}配置详情:${NC}"
         echo -e "  监听端口: ${GREEN}$EXIT_LISTEN_PORT${NC}"
-        echo -e "  转发到: ${GREEN}${FORWARD_TARGET:-$FORWARD_IP:$FORWARD_PORT}${NC}"
+        echo -e "  转发到: ${GREEN}$FORWARD_TARGET${NC}"
 
     else
         echo -e "${RED}错误: 无效的角色配置 (ROLE=${ROLE})${NC}"
@@ -6571,12 +6504,12 @@ service_status() {
                         local target_host="${FORWARD_TARGET%:*}"
                         local target_port="${FORWARD_TARGET##*:}"
                         local display_target=$(smart_display_target "$target_host")
-                        local display_ip=$(get_exit_server_listen_ip)
+                        local display_ip="::"
                         echo -e "  ${GREEN}$RULE_NAME${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                     else
                         # 中转服务器使用REMOTE_HOST
                         local display_target=$(smart_display_target "$REMOTE_HOST")
-                        local display_ip=$(get_nat_server_listen_ip)
+                        local display_ip="${NAT_LISTEN_IP:-::}"
                         local through_display="${THROUGH_IP:-::}"
                         echo -e "  ${GREEN}$RULE_NAME${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                     fi
@@ -6617,7 +6550,7 @@ service_status() {
             echo -e "配置模式: ${GREEN}传统模式 - 出口服务器 (双端Realm搭建隧道)${NC}"
             echo -e "监听端口: ${GREEN}$EXIT_LISTEN_PORT${NC}"
 
-            # 显示转发目标（优先使用新格式）
+            # 显示转发目标
             if [ -n "$FORWARD_TARGET" ]; then
                 echo -e "转发到: ${GREEN}$FORWARD_TARGET${NC}"
                 # 如果是多地址，显示详细信息
@@ -6625,7 +6558,7 @@ service_status() {
                     echo -e "转发模式: ${YELLOW}负载均衡 (多地址)${NC}"
                 fi
             else
-                echo -e "转发到: ${GREEN}$FORWARD_IP:$FORWARD_PORT${NC}"
+                echo -e "${YELLOW}转发目标未配置${NC}"
             fi
         fi
     fi
@@ -6644,9 +6577,9 @@ service_status() {
             if [ -f "$rule_file" ]; then
                 if read_rule_file "$rule_file" && [ "$ENABLED" = "true" ]; then
                     if [ "$RULE_ROLE" = "2" ]; then
-                        local display_ip=$(get_exit_server_listen_ip)
+                        local display_ip="::"
                     else
-                        local display_ip=$(get_nat_server_listen_ip)
+                        local display_ip="${NAT_LISTEN_IP:-::}"
                     fi
                     if $port_check_cmd 2>/dev/null | grep -q ":${LISTEN_PORT} "; then
                         echo -e "端口 ${LISTEN_IP:-$display_ip}:$LISTEN_PORT ($RULE_NAME): ${GREEN}正在监听${NC}"
@@ -6659,14 +6592,14 @@ service_status() {
     else
         # 传统模式：检查传统配置的端口
         if [ "$ROLE" -eq 1 ] && [ -n "$NAT_LISTEN_PORT" ]; then
-            local display_ip=$(get_nat_server_listen_ip)
+            local display_ip="${NAT_LISTEN_IP:-::}"
             if $port_check_cmd 2>/dev/null | grep -q ":${NAT_LISTEN_PORT} "; then
                 echo -e "端口 ${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT: ${GREEN}正在监听${NC}"
             else
                 echo -e "端口 ${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT: ${RED}未监听${NC}"
             fi
         elif [ "$ROLE" -eq 2 ] && [ -n "$EXIT_LISTEN_PORT" ]; then
-            local exit_listen_ip=$(get_exit_server_listen_ip)
+            local exit_listen_ip="::"
             if $port_check_cmd 2>/dev/null | grep -q ":${EXIT_LISTEN_PORT} "; then
                 echo -e "端口 ${exit_listen_ip}:$EXIT_LISTEN_PORT: ${GREEN}正在监听${NC}"
             else
@@ -6774,296 +6707,140 @@ cleanup_firewall_rules() {
     fi
 }
 
-# 卸载 Realm 服务和配置
+# 高效简洁的卸载函数
 uninstall_realm() {
     echo -e "${RED}⚠️  警告: 即将分阶段卸载 Realm 端口转发服务${NC}"
     echo ""
 
-    # 第一阶段：Realm 相关文件
-    echo -e "${YELLOW}=== 第一阶段：Realm 服务和配置文件 ===${NC}"
-    echo -e "${BLUE}此操作将删除以下 Realm 相关内容:${NC}"
-    echo -e "  - Realm 主程序: $REALM_PATH"
-    echo -e "  - 配置目录: $CONFIG_DIR"
-    echo -e "  - 规则目录: $RULES_DIR"
-    echo -e "  - 状态文件: $MANAGER_CONF"
-    echo -e "  - 系统服务: $SYSTEMD_PATH"
-    echo -e "  - 日志文件: $LOG_PATH"
-    echo -e "  - 定时任务和相关脚本"
-    echo -e "  - 防火墙规则和端口配置"
-    echo -e "  - 临时文件和缓存"
-    echo ""
-
+    # 第一阶段：Realm 服务和配置
+    echo -e "${YELLOW}=== 第一阶段：Realm 相关全部服务和配置文件 ===${NC}"
     read -p "确认删除 Realm 服务和配置？(y/n): " confirm_realm
-    if [[ ! "$confirm_realm" =~ ^[Yy]$ ]]; then
-        echo -e "${BLUE}第一阶段卸载已取消${NC}"
+    if [[ "$confirm_realm" =~ ^[Yy]$ ]]; then
+        uninstall_realm_stage_one
+        echo -e "${GREEN}✓ 第一阶段完成${NC}"
+    else
+        echo -e "${BLUE}第一阶段已取消${NC}"
         return 0
     fi
 
     echo ""
-    echo -e "${YELLOW}正在执行第一阶段卸载...${NC}"
-
-    # 停止并禁用服务
-    if systemctl is-active realm >/dev/null 2>&1; then
-        echo -e "${BLUE}停止 Realm 服务...${NC}"
-        systemctl stop realm
+    # 第二阶段：脚本文件
+    echo -e "${YELLOW}=== 第二阶段：xwPF 脚本相关全部文件 ===${NC}"
+    read -p "确认删除脚本文件？(y/n): " confirm_script
+    if [[ "$confirm_script" =~ ^[Yy]$ ]]; then
+        uninstall_script_files
+        echo -e "${GREEN}🗑️  完全卸载完成${NC}"
+    else
+        echo -e "${BLUE}脚本文件保留，可继续使用 pf 命令${NC}"
     fi
+}
 
-    if systemctl is-enabled realm >/dev/null 2>&1; then
-        echo -e "${BLUE}禁用 Realm 服务...${NC}"
-        systemctl disable realm >/dev/null 2>&1
-    fi
-
-
-    # 清理健康检查服务
-    echo -e "${BLUE}清理健康检查服务...${NC}"
+# 第一阶段：清理 Realm 相关
+uninstall_realm_stage_one() {
+    # 停止服务
+    systemctl is-active realm >/dev/null 2>&1 && systemctl stop realm
+    systemctl is-enabled realm >/dev/null 2>&1 && systemctl disable realm >/dev/null 2>&1
     stop_health_check_service
-    rm -rf "/etc/realm/health" 2>/dev/null
-    rm -f "/var/log/realm-health.log" 2>/dev/null
+    pgrep "realm" >/dev/null 2>&1 && { pkill -f "realm"; sleep 2; pkill -9 -f "realm" 2>/dev/null; }
 
-    # 清理锁文件和垃圾文件
-    echo -e "${BLUE}清理锁文件和垃圾文件...${NC}"
-    # 精确匹配我们的锁文件模式，避免误删
-    for lock_pattern in "/var/lock/realm-health-check.lock" "/var/run/realm.pid" "/tmp/realm-*.tmp"; do
-        for lock_file in $lock_pattern; do
-            if [ -f "$lock_file" ]; then
-                rm -f "$lock_file" && echo -e "${GREEN}✓${NC} 已删除: $lock_file"
-            fi
-        done
-    done
+    # 清理文件 - 使用通用清理函数
+    cleanup_files_by_paths "$REALM_PATH" "$CONFIG_DIR" "$SYSTEMD_PATH" "$LOG_PATH" "/etc/realm"
+    cleanup_files_by_pattern "realm" "/var/log /tmp /var/tmp"
 
-    # 清理配置备份文件
-    for backup_dir in "/etc/realm" "$RULES_DIR"; do
-        if [ -d "$backup_dir" ]; then
-            find "$backup_dir" -name "*.bak" -o -name "*.backup" -o -name "*.old" -o -name "*.tmp" 2>/dev/null | while read -r file; do
-                if [ -f "$file" ]; then
-                    rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除备份文件: $file"
-                fi
-            done &
-        fi
-    done
-    wait
-
-    # 清理防火墙规则
-    echo -e "${BLUE}清理防火墙规则...${NC}"
+    # 清理系统配置
+    [ -f "/etc/sysctl.d/90-enable-MPTCP.conf" ] && rm -f "/etc/sysctl.d/90-enable-MPTCP.conf"
+    command -v ip >/dev/null 2>&1 && ip mptcp endpoint flush 2>/dev/null
     cleanup_firewall_rules
+    systemctl daemon-reload
+}
 
-    # 全面强化删除 Realm 相关文件（确保删除所有可能的安装）
-    echo -e "${BLUE}全面搜索并删除 Realm 文件和配置...${NC}"
+# 第二阶段：清理脚本文件
+uninstall_script_files() {
+    # 清理 xwPF.sh 文件
+    cleanup_files_by_pattern "xwPF.sh" "/"
 
-    # 首先终止所有realm相关进程
-    echo -e "${BLUE}终止 realm 相关进程...${NC}"
-    local realm_processes=("realm" "realm2")
-    for process in "${realm_processes[@]}"; do
-        if pgrep "$process" >/dev/null 2>&1; then
-            echo -e "${YELLOW}发现运行中的 $process 进程${NC}"
-            pkill -f "$process" && echo -e "${GREEN}✓${NC} 已终止 $process 进程"
-            sleep 2
-            # 强制终止仍在运行的进程
-            if pgrep "$process" >/dev/null 2>&1; then
-                pkill -9 -f "$process" && echo -e "${GREEN}✓${NC} 已强制终止 $process 进程"
-            fi
+    # 清理 pf 命令（验证后删除）
+    local exec_dirs=("/usr/local/bin" "/usr/bin" "/bin" "/opt/bin" "/root/bin")
+    for dir in "${exec_dirs[@]}"; do
+        [ -f "$dir/pf" ] && grep -q "xwPF" "$dir/pf" 2>/dev/null && rm -f "$dir/pf"
+        [ -L "$dir/pf" ] && [[ "$(readlink "$dir/pf" 2>/dev/null)" == *"xwPF"* ]] && rm -f "$dir/pf"
+    done
+}
+
+# 通用文件路径清理函数
+cleanup_files_by_paths() {
+    for path in "$@"; do
+        if [ -f "$path" ]; then
+            rm -f "$path"
+        elif [ -d "$path" ]; then
+            rm -rf "$path"
         fi
     done
+}
 
-    # 扩展搜索目录（包括所有可能的安装位置）
-    local search_dirs=("/usr/local/bin" "/usr/bin" "/bin" "/sbin" "/usr/sbin" "/opt" "/tmp" "/root" "/home" "/var" "/usr/local" "/usr/share")
+# 通用文件模式清理函数
+cleanup_files_by_pattern() {
+    local pattern="$1"
+    local search_dirs="${2:-/}"
 
-    # 并行搜索并删除 realm 主程序文件（全面搜索，包括realm2等变体）
-    echo -e "${BLUE}全面搜索 realm 主程序文件...${NC}"
-    local realm_patterns=("realm" "realm2" "*realm*")
-    for dir in "${search_dirs[@]}"; do
-        if [ -d "$dir" ]; then
-            # 搜索所有可能的realm文件变体
-            for pattern in "${realm_patterns[@]}"; do
-                find "$dir" -name "$pattern" -type f 2>/dev/null | while read -r file; do
-                    if [ -f "$file" ] && [[ "$(basename "$file")" == *"realm"* ]]; then
-                        echo -e "${YELLOW}发现 realm 文件: $file${NC}"
-                        rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除: $file"
-                    fi
-                done &
-            done
-        fi
-    done
-    wait  # 等待所有并行搜索完成
-
-    # 全面搜索并删除realm配置目录（包括realm2等变体）
-    echo -e "${BLUE}搜索 realm 配置目录...${NC}"
-    local config_dirs=("/etc" "/usr/local/etc" "/opt" "/root" "/home")
-    local config_patterns=("realm" "realm2" "*realm*")
-    for dir in "${config_dirs[@]}"; do
-        if [ -d "$dir" ]; then
-            for pattern in "${config_patterns[@]}"; do
-                find "$dir" -name "$pattern" -type d 2>/dev/null | while read -r config_dir; do
-                    if [ -d "$config_dir" ] && [[ "$(basename "$config_dir")" == *"realm"* ]]; then
-                        echo -e "${YELLOW}发现 realm 配置目录: $config_dir${NC}"
-                        rm -rf "$config_dir" && echo -e "${GREEN}✓${NC} 已删除配置目录: $config_dir"
-                    fi
-                done &
-            done
-        fi
+    IFS=' ' read -ra dirs_array <<< "$search_dirs"
+    for dir in "${dirs_array[@]}"; do
+        [ -d "$dir" ] && find "$dir" -name "*${pattern}*" -type f 2>/dev/null | while read -r file; do
+            [ -f "$file" ] && rm -f "$file"
+        done &
     done
     wait
+}
 
-    # 全面搜索并删除realm系统服务文件（包括realm2等变体）
-    echo -e "${BLUE}搜索 realm 系统服务文件...${NC}"
-    local service_dirs=("/etc/systemd/system" "/lib/systemd/system" "/usr/lib/systemd/system")
-    local service_patterns=("*realm*" "*realm2*")
-    for dir in "${service_dirs[@]}"; do
-        if [ -d "$dir" ]; then
-            for pattern in "${service_patterns[@]}"; do
-                find "$dir" -name "$pattern" -type f 2>/dev/null | while read -r service_file; do
-                    if [ -f "$service_file" ] && [[ "$(basename "$service_file")" == *"realm"* ]]; then
-                        echo -e "${YELLOW}发现 realm 服务文件: $service_file${NC}"
-                        rm -f "$service_file" && echo -e "${GREEN}✓${NC} 已删除服务文件: $service_file"
-                    fi
-                done &
-            done
-        fi
-    done
-    wait
+# 批量清理日志文件
+cleanup_log_files() {
+    local pattern="$1"
+    local search_dirs="${2:-/var/log /tmp /root /home /usr/local/var/log /opt}"
 
-    # 全面搜索并删除realm相关日志文件
-    echo -e "${BLUE}全面搜索 realm 日志文件...${NC}"
-    local log_dirs=("/var/log" "/tmp" "/root" "/home" "/usr/local/var/log" "/opt")
-    for log_dir in "${log_dirs[@]}"; do
+    IFS=' ' read -ra dirs_array <<< "$search_dirs"
+    for log_dir in "${dirs_array[@]}"; do
         if [ -d "$log_dir" ]; then
-            find "$log_dir" -name "*realm*" -type f 2>/dev/null | while read -r file; do
+            find "$log_dir" -name "*${pattern}*" -type f 2>/dev/null | while read -r file; do
                 if [ -f "$file" ]; then
-                    echo -e "${YELLOW}发现 realm 日志文件: $file${NC}"
+                    echo -e "${YELLOW}发现 ${pattern} 日志文件: $file${NC}"
                     rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除日志文件: $file"
                 fi
             done &
         fi
     done
     wait  # 等待所有并行搜索完成
+}
 
-    # 清理MPTCP配置文件
-    echo -e "${BLUE}清理MPTCP配置文件...${NC}"
-    local mptcp_conf="/etc/sysctl.d/90-enable-MPTCP.conf"
-    if [ -f "$mptcp_conf" ]; then
-        echo -e "${YELLOW}发现MPTCP配置文件: $mptcp_conf${NC}"
-        rm -f "$mptcp_conf" && echo -e "${GREEN}✓${NC} 已删除MPTCP配置文件"
-    fi
+# 统一的临时文件清理函数
+cleanup_temp_files_by_pattern() {
+    local pattern="$1"
+    local search_dirs="${2:-/tmp /var/tmp /root /home /usr/local/tmp}"
+    local exclude_paths="${3:-/realm/config /realm/rules}"  # 排除重要配置路径
 
-    # 清理MPTCP端点配置
-    if command -v ip >/dev/null 2>&1 && /usr/bin/ip mptcp endpoint show >/dev/null 2>&1; then
-        local endpoints_output=$(/usr/bin/ip mptcp endpoint show 2>/dev/null)
-        if [ -n "$endpoints_output" ]; then
-            echo -e "${BLUE}清理MPTCP端点配置...${NC}"
-            /usr/bin/ip mptcp endpoint flush 2>/dev/null
-            echo -e "${GREEN}✓${NC} 已清理所有MPTCP端点"
-        fi
-    fi
-
-    # 全面清理临时文件、缓存和下载文件
-    echo -e "${BLUE}全面清理临时文件和缓存...${NC}"
-
-    # 清理新的脚本位置缓存
-    rm -f "/tmp/xwPF_script_locations_cache" && echo -e "${GREEN}✓${NC} 已清理脚本位置缓存"
-    rm -f "/tmp/xwPF_script_path_cache" && echo -e "${GREEN}✓${NC} 已清理脚本路径缓存"
-    rm -f "/tmp/realm_path_cache" && echo -e "${GREEN}✓${NC} 已清理故障转移路径缓存"
-    local tmp_dirs=("/tmp" "/var/tmp" "/root" "/home" "/usr/local/tmp")
-    for tmp_dir in "${tmp_dirs[@]}"; do
+    IFS=' ' read -ra dirs_array <<< "$search_dirs"
+    for tmp_dir in "${dirs_array[@]}"; do
         if [ -d "$tmp_dir" ]; then
-            # 搜索realm相关文件
-            find "$tmp_dir" -name "*realm*" -type f 2>/dev/null | while read -r file; do
+            find "$tmp_dir" -name "*${pattern}*" -type f 2>/dev/null | while read -r file; do
                 if [ -f "$file" ]; then
-                    echo -e "${YELLOW}发现 realm 临时文件: $file${NC}"
-                    rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除临时文件: $file"
-                fi
-            done &
+                    # 检查是否在排除路径中
+                    local should_exclude=false
+                    IFS=' ' read -ra exclude_array <<< "$exclude_paths"
+                    for exclude_path in "${exclude_array[@]}"; do
+                        if [[ "$file" == *"$exclude_path"* ]]; then
+                            should_exclude=true
+                            break
+                        fi
+                    done
 
-            # 搜索可能的realm下载文件
-            find "$tmp_dir" -name "*.tar.gz" -type f 2>/dev/null | while read -r file; do
-                if [ -f "$file" ] && tar -tzf "$file" 2>/dev/null | grep -q "realm"; then
-                    echo -e "${YELLOW}发现 realm 下载文件: $file${NC}"
-                    rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除下载文件: $file"
-                fi
-            done &
-
-            # 搜索规则文件备份和临时文件
-            find "$tmp_dir" -name "rule-*.conf.bak" -o -name "rule-*.conf.tmp" -o -name "*.bak" -o -name "*.tmp" 2>/dev/null | while read -r file; do
-                if [ -f "$file" ] && [[ "$(basename "$file")" == *"realm"* || "$(basename "$file")" == *"rule-"* ]]; then
-                    echo -e "${YELLOW}发现 realm 备份文件: $file${NC}"
-                    rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除备份文件: $file"
+                    if [ "$should_exclude" = false ]; then
+                        echo -e "${YELLOW}发现 ${pattern} 临时文件: $file${NC}"
+                        rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除临时文件: $file"
+                    fi
                 fi
             done &
         fi
     done
     wait  # 等待所有并行搜索完成
-
-    # 刷新systemd
-    echo -e "${BLUE}刷新系统服务...${NC}"
-    systemctl daemon-reload
-
-    echo ""
-    echo -e "${GREEN}✓ 第一阶段卸载完成！Realm 服务和所有相关文件已删除${NC}"
-    echo ""
-
-    # 第二阶段：脚本文件
-    echo -e "${YELLOW}=== 第二阶段：xwPF 脚本文件 ===${NC}"
-    echo -e "${BLUE}此操作将查找并删除所有 xwPF 相关文件${NC}"
-    echo ""
-
-    read -p "确认删除脚本文件？(y/n): " confirm_script
-    if [[ "$confirm_script" =~ ^[Yy]$ ]]; then
-        echo ""
-        echo -e "${YELLOW}正在查找并删除 xwPF 相关文件...${NC}"
-
-        # 全局搜索 xwPF.sh 文件（多线程精确搜索）
-        echo -e "${BLUE}全局搜索 xwPF.sh 文件...${NC}"
-
-        # 全局搜索所有挂载点，xwPF.sh文件名唯一不会误删
-        local search_roots=("/" "/usr" "/opt" "/home" "/root" "/var" "/tmp" "/etc")
-        for root in "${search_roots[@]}"; do
-            if [ -d "$root" ]; then
-                find "$root" -name "xwPF.sh" -type f 2>/dev/null | while read -r file; do
-                    if [ -f "$file" ]; then
-                        rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除: $file"
-                    fi
-                done &
-            fi
-        done
-        wait  # 等待所有并行搜索完成
-
-        # 搜索 pf 命令（严格验证是否为 xwPF 相关）
-        echo -e "${BLUE}搜索 pf 命令...${NC}"
-        # 只在可执行文件目录搜索，避免误删其他pf命令
-        local exec_dirs=("/usr/local/bin" "/usr/bin" "/bin" "/opt/bin" "/root/bin")
-        for dir in "${exec_dirs[@]}"; do
-            if [ -d "$dir" ]; then
-                find "$dir" -name "pf" -type f 2>/dev/null | while read -r file; do
-                    # 严格验证：必须包含xwPF特征字符串
-                    if [ -f "$file" ] && grep -q "xwPF.*端口转发管理脚本\|xwPF.sh" "$file" 2>/dev/null; then
-                        rm -f "$file" && echo -e "${GREEN}✓${NC} 已删除: $file"
-                    fi
-                done &
-            fi
-        done
-        wait  # 等待所有并行搜索完成
-
-        # 查找并删除指向 xwPF 的符号链接
-        echo -e "${BLUE}搜索相关符号链接...${NC}"
-        # 只在可执行文件目录搜索符号链接
-        for dir in "${exec_dirs[@]}"; do
-            if [ -d "$dir" ]; then
-                find "$dir" -name "pf" -type l 2>/dev/null | while read -r link; do
-                    target=$(readlink "$link" 2>/dev/null)
-                    if [[ "$target" == *"xwPF"* ]]; then
-                        rm -f "$link" && echo -e "${GREEN}✓${NC} 已删除符号链接: $link"
-                    fi
-                done &
-            fi
-        done
-        wait  # 等待所有并行搜索完成
-
-        echo ""
-        echo -e "${GREEN}🗑️  完全卸载完成！${NC}"
-        echo -e "${BLUE}所有 Realm 和 xwPF 相关文件已从系统中完全移除${NC}"
-    else
-        echo -e "${BLUE}脚本文件保留，可继续使用 pf 命令管理其他 Realm 服务${NC}"
-    fi
-    echo ""
 }
 
 # 查看当前配置
@@ -7123,12 +6900,12 @@ show_config() {
                             local target_host="${FORWARD_TARGET%:*}"
                             local target_port="${FORWARD_TARGET##*:}"
                             local display_target=$(smart_display_target "$target_host")
-                            local display_ip=$(get_exit_server_listen_ip)
+                            local display_ip="::"
                             echo -e "    监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                         else
                             # 中转服务器使用REMOTE_HOST
                             local display_target=$(smart_display_target "$REMOTE_HOST")
-                            local display_ip=$(get_nat_server_listen_ip)
+                            local display_ip="${NAT_LISTEN_IP:-::}"
                             local through_display="${THROUGH_IP:-::}"
                             echo -e "    中转: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                         fi
@@ -7307,7 +7084,7 @@ show_brief_status() {
                         local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
                         local display_target=$(smart_display_target "$REMOTE_HOST")
                         local rule_display_name="$RULE_NAME"
-                        local display_ip=$(get_nat_server_listen_ip)
+                        local display_ip="${NAT_LISTEN_IP:-::}"
                         local through_display="${THROUGH_IP:-::}"
                         echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                         local note_display=""
@@ -7357,7 +7134,7 @@ show_brief_status() {
                         local target_port="${FORWARD_TARGET##*:}"
                         local display_target=$(smart_display_target "$target_host")
                         local rule_display_name="$RULE_NAME"
-                        local display_ip=$(get_exit_server_listen_ip)
+                        local display_ip="::"
                         echo -e "  • ${GREEN}$rule_display_name${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
                         local note_display=""
                         if [ -n "$RULE_NOTE" ]; then
@@ -7416,7 +7193,7 @@ show_brief_status() {
             source "$MANAGER_CONF" 2>/dev/null
             if [ "$ROLE" -eq 1 ]; then
                 echo -e "配置模式: ${GREEN}传统模式${NC} - 中转服务器"
-                local display_ip=$(get_nat_server_listen_ip)
+                local display_ip="${NAT_LISTEN_IP:-::}"
                 local through_display="${NAT_THROUGH_IP:-::}"
                 echo -e "中转: ${YELLOW}${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT${NC} → ${YELLOW}$through_display${NC} → ${GREEN}$REMOTE_IP:$REMOTE_PORT${NC}"
                 if [ -n "$SECURITY_LEVEL" ]; then
@@ -7425,7 +7202,7 @@ show_brief_status() {
                 fi
             elif [ "$ROLE" -eq 2 ]; then
                 echo -e "配置模式: ${GREEN}传统模式${NC} - 出口服务器 (双端Realm搭建隧道)"
-                local exit_listen_ip=$(get_exit_server_listen_ip)
+                local exit_listen_ip="::"
                 echo -e "监听端口: ${YELLOW}${exit_listen_ip}:$EXIT_LISTEN_PORT${NC}"
                 if [ -n "$SECURITY_LEVEL" ]; then
                     local security_display=$(get_security_display "${SECURITY_LEVEL:-0}" "")
@@ -7980,7 +7757,7 @@ while true; do
             fi
         done
     else
-        # 降级方案：轮询检查
+        # 轮询检查
         if [ -f "$MONITOR_FILE" ]; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') [MONITOR] 检测到配置更新请求"
 
@@ -8208,7 +7985,7 @@ done
 if [ "$config_changed" = true ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') [CONFIG] 检测到节点状态变化，正在更新配置..."
 
-    # 查找主脚本 - 参考成功案例的分阶段查找
+    # 查找主脚本
     script_path=""
     cache_file="/tmp/realm_path_cache"
 

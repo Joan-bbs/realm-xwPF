@@ -2139,10 +2139,7 @@ generate_final_report() {
     echo ""
     echo -e "─────────────────────────────────────────────────────────────────"
 
-
-    echo ""
     echo -e "测试完成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
-    echo ""
     echo -e "${WHITE}按任意键返回主菜单...${NC}"
     read -n 1 -s
 }
