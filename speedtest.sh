@@ -1960,7 +1960,7 @@ run_performance_tests() {
 
 # 生成最终报告
 generate_final_report() {
-    echo -e "${GREEN}================== 网络链路测试功能完整报告 ==================${NC}"
+    echo -e "${GREEN}===================== 网络链路测试功能完整报告 =====================${NC}"
     echo ""
 
     # 报告标题
@@ -2085,12 +2085,12 @@ generate_final_report() {
 
     # UDP下行
     if [ "$UDP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_down_speed_mbps]}" ]; then
-        printf " ⬇️ 下行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
+        printf " ⬇️ UDP下行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
             "${TEST_RESULTS[udp_down_speed_mbps]} Mbps (${TEST_RESULTS[udp_down_speed_mibs]} MB/s)" \
             "${TEST_RESULTS[udp_down_loss]}" \
             "${TEST_RESULTS[udp_down_jitter]} ms"
     else
-        printf " ⬇️ 下行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
+        printf " ⬇️ UDP下行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
             "测试失败" "N/A" "N/A"
     fi
 
