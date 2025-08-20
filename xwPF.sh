@@ -1,17 +1,16 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.6.5"
+SCRIPT_VERSION="v1.7.0"
 
-# 全局变量声明
-ROLE=""
+# 临时配置变量（仅在配置过程中使用）
 NAT_LISTEN_PORT=""
 NAT_LISTEN_IP=""
 NAT_THROUGH_IP="::"
 REMOTE_IP=""
 REMOTE_PORT=""
 EXIT_LISTEN_PORT=""
-FORWARD_TARGET=""  # 支持多地址和域名
+FORWARD_TARGET=""
 
 # 配置变量
 SECURITY_LEVEL=""  # 传输模式：standard, ws, tls_self, tls_ca, ws_tls_self, ws_tls_ca
@@ -96,7 +95,7 @@ LOG_PATH="/var/log/realm.log"
 # 转发配置管理路径
 RULES_DIR="${CONFIG_DIR}/rules"
 
-# 默认tls域名（双端realm搭建隧道需要相同SNI）
+# 默认tls域名（双端Realm架构需要相同SNI）
 DEFAULT_SNI_DOMAIN="www.tesla.com"
 
 # 统一的realm配置模板（避免重复定义）
@@ -152,38 +151,6 @@ $base_config,
 EOF
 }
 
-# 生成传统单endpoint配置（向后兼容）
-generate_legacy_single_config() {
-    local listen="$1"
-    local remote="$2"
-    local through="$3"
-    local transport_config="$4"
-    local config_path="${5:-$CONFIG_PATH}"
-
-    # 构建endpoint配置
-    local endpoint_config="
-        {
-            \"listen\": \"$listen\",
-            \"remote\": \"$remote\""
-
-    # 添加through配置（如果存在且不为::）
-    if [ -n "$through" ] && [ "$through" != "::" ]; then
-        endpoint_config="$endpoint_config,
-            \"through\": \"$through\""
-    fi
-
-    # 添加传输配置（如果存在）
-    if [ -n "$transport_config" ]; then
-        endpoint_config="$endpoint_config,
-            $transport_config"
-    fi
-
-    endpoint_config="$endpoint_config
-        }"
-
-    # 使用统一模板生成配置
-    generate_complete_config "$endpoint_config" "$config_path"
-}
 
 
 # 检查root权限
@@ -332,16 +299,7 @@ ROLE=$ROLE
 INSTALL_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
 # 使用全局版本变量
 
-# 中转服务器配置
-NAT_LISTEN_PORT=$NAT_LISTEN_PORT
-NAT_LISTEN_IP=$NAT_LISTEN_IP
-NAT_THROUGH_IP=$NAT_THROUGH_IP
-REMOTE_IP=$REMOTE_IP
-REMOTE_PORT=$REMOTE_PORT
 
-# 出口服务器配置
-EXIT_LISTEN_PORT=$EXIT_LISTEN_PORT
-FORWARD_TARGET=$FORWARD_TARGET
 
 # 新增配置选项
 SECURITY_LEVEL=$SECURITY_LEVEL
@@ -371,11 +329,6 @@ read_manager_conf() {
         exit 1
     fi
 
-    # 向后兼容：确保FORWARD_TARGET存在
-    if [ -z "$FORWARD_TARGET" ]; then
-        # 如果配置文件中没有FORWARD_TARGET，可能是旧版本配置
-        echo -e "${YELLOW}检测到旧版本配置格式，请重新配置转发规则${NC}"
-    fi
 }
 
 # 检查端口占用（忽略realm自身占用）
@@ -914,7 +867,7 @@ list_rules_for_management() {
                     if [ "$has_relay_rules" = true ]; then
                         echo ""
                     fi
-                    echo -e "${GREEN}落地服务器 (双端Realm搭建隧道):${NC}"
+                    echo -e "${GREEN}落地服务器 (双端Realm架构):${NC}"
                     has_exit_rules=true
                 fi
                 exit_count=$((exit_count + 1))
@@ -1002,7 +955,7 @@ list_all_rules() {
 
                 echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME"
                 # 构建安全级别显示
-                local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                 local note_display=""
                 if [ -n "$RULE_NOTE" ]; then
                     note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
@@ -1036,9 +989,9 @@ interactive_add_rule() {
     # 角色选择
     echo "请选择新配置的角色:"
     echo -e "${GREEN}[1]${NC} 中转服务器"
-    echo -e "${GREEN}[2]${NC} 落地服务器 (双端Realm搭建隧道)"
+    echo -e "${GREEN}[2]${NC} 服务端(落地)服务器 (双端Realm架构)"
+    echo "双端Realm架构解密用于：隧道,MPTCP，Proxy Protocol"
     echo ""
-
     local RULE_ROLE
     while true; do
         read -p "请输入数字 [1-2]: " RULE_ROLE
@@ -1048,7 +1001,7 @@ interactive_add_rule() {
                 break
                 ;;
             2)
-                echo -e "${GREEN}已选择: 落地服务器 (双端Realm搭建隧道)${NC}"
+                echo -e "${GREEN}已选择: 服务端(落地)服务器 (双端Realm架构)${NC}"
                 break
                 ;;
             *)
@@ -1751,7 +1704,7 @@ rules_management_menu() {
                             fi
                             relay_count=$((relay_count + 1))
                             # 显示详细的转发配置信息
-                            local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                            local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                             local display_target=$(smart_display_target "$REMOTE_HOST")
                             local rule_display_name="$RULE_NAME"
                             local display_ip="${NAT_LISTEN_IP:-::}"
@@ -1793,12 +1746,12 @@ rules_management_menu() {
                                 if [ "$has_relay_rules" = true ]; then
                                     echo ""
                                 fi
-                                echo -e "${GREEN}落地服务器 (双端Realm搭建隧道):${NC}"
+                                echo -e "${GREEN}落地服务器 (双端Realm架构):${NC}"
                                 has_exit_rules=true
                             fi
                             exit_count=$((exit_count + 1))
                             # 显示详细的转发配置信息
-                            local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                            local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                             # 落地服务器使用FORWARD_TARGET而不是REMOTE_HOST
                             local target_host="${FORWARD_TARGET%:*}"
                             local target_port="${FORWARD_TARGET##*:}"
@@ -4200,7 +4153,7 @@ interactive_role_selection() {
     echo ""
     echo "请选择本服务器的角色:"
     echo -e "${GREEN}[1]${NC} 中转服务器"
-    echo -e "${GREEN}[2]${NC} 落地服务器 (双端Realm搭建隧道)"
+    echo -e "${GREEN}[2]${NC} 落地服务器 (双端Realm架构)"
     echo ""
 
     while true; do
@@ -4211,7 +4164,7 @@ interactive_role_selection() {
                 break
                 ;;
             2)
-                echo -e "${GREEN}已选择: 落地服务器 (双端Realm搭建隧道)${NC}"
+                echo -e "${GREEN}已选择: 落地服务器 (双端Realm架构)${NC}"
                 break
                 ;;
             *)
@@ -4542,7 +4495,7 @@ configure_nat_server() {
 
 # 出口服务器交互配置
 configure_exit_server() {
-    echo -e "${YELLOW}=== 落地服务器配置 (双端Realm搭建隧道) ===${NC}"
+    echo -e "${YELLOW}=== 落地服务器配置 (双端Realm架构) ===${NC}"
     echo ""
 
     # 显示本机公网IP
@@ -4584,7 +4537,7 @@ configure_exit_server() {
     # 配置转发目标
     echo "配置转发目标 (就是设置好的本地业务软件,服务等等的信息):"
     echo ""
-    echo -e "${YELLOW}双端realm搭建隧道${NC}"
+    echo -e "${YELLOW}双端Realm架构${NC}"
     echo -e "${YELLOW}ipv4输入127.0.0.1,IPv6输入: ::1${NC}"
     echo ""
 
@@ -6127,19 +6080,12 @@ generate_realm_config() {
         done
     fi
 
-    # 如果没有规则，检查是否有传统配置
+    # 如果没有启用的规则，生成空配置
     if [ "$has_rules" = false ]; then
-        if [ -f "$MANAGER_CONF" ]; then
-            echo -e "${BLUE}未找到启用的规则，使用传统配置模式${NC}"
-            generate_legacy_config
-            return $?
-        else
-            echo -e "${BLUE}未找到启用的规则，生成空配置${NC}"
-            # 使用统一模板生成空配置
-            generate_complete_config ""
-            echo -e "${GREEN}✓ 空配置文件已生成${NC}"
-            return 0
-        fi
+        echo -e "${BLUE}未找到启用的规则，生成空配置${NC}"
+        generate_complete_config ""
+        echo -e "${GREEN}✓ 空配置文件已生成${NC}"
+        return 0
     fi
 
     # 生成基于规则的配置
@@ -6176,50 +6122,6 @@ generate_realm_config() {
             fi
         fi
     done
-}
-
-# 传统配置生成（向后兼容）
-generate_legacy_config() {
-    # 读取状态文件
-    read_manager_conf
-
-    if [ "$ROLE" -eq 1 ]; then
-        # 中转服务器配置
-        # 获取传输配置
-        local transport_config=$(get_transport_config "$SECURITY_LEVEL" "$TLS_SERVER_NAME" "$TLS_CERT_PATH" "$TLS_KEY_PATH" "1" "$WS_PATH")
-        local transport_line=""
-        if [ -n "$transport_config" ]; then
-            transport_line=",
-            $transport_config"
-        fi
-
-        # 使用统一模板生成中转服务器配置
-        generate_legacy_single_config \
-            "${NAT_LISTEN_IP}:${NAT_LISTEN_PORT}" \
-            "${REMOTE_IP}:${REMOTE_PORT}" \
-            "$NAT_THROUGH_IP" \
-            "$transport_config"
-        echo -e "${GREEN}✓ 中转服务器配置文件已生成${NC}"
-        echo -e "${BLUE}配置详情:${NC}"
-        local display_ip="${NAT_LISTEN_IP:-::}"
-        echo -e "  监听地址: ${GREEN}${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT${NC}"
-        echo -e "  转发到: ${GREEN}$REMOTE_IP:$REMOTE_PORT${NC}"
-
-    elif [ "$ROLE" -eq 2 ]; then
-        # 出口服务器配置（双端Realm搭建隧道）
-        local endpoints_config=$(generate_forward_endpoints_config)
-
-        # 使用统一模板生成出口服务器配置
-        generate_complete_config "$endpoints_config"
-        echo -e "${GREEN}✓ 出口服务器配置文件已生成${NC}"
-        echo -e "${BLUE}配置详情:${NC}"
-        echo -e "  监听端口: ${GREEN}$EXIT_LISTEN_PORT${NC}"
-        echo -e "  转发到: ${GREEN}$FORWARD_TARGET${NC}"
-
-    else
-        echo -e "${RED}错误: 无效的角色配置 (ROLE=${ROLE})${NC}"
-        exit 1
-    fi
 }
 
 # 生成 systemd 服务文件 - 简化（内置日志管理）
@@ -6514,7 +6416,7 @@ service_status() {
                         echo -e "  ${GREEN}$RULE_NAME${NC}: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                     fi
                     # 构建安全级别显示
-                    local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                    local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                     local note_display=""
                     if [ -n "$RULE_NOTE" ]; then
                         note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
@@ -6540,27 +6442,6 @@ service_status() {
                 fi
             fi
         done
-    else
-        # 传统配置显示
-        if [ "$ROLE" -eq 1 ]; then
-            echo -e "配置模式: ${GREEN}传统模式 - 中转服务器${NC}"
-            echo -e "监听端口: ${GREEN}$NAT_LISTEN_PORT${NC}"
-            echo -e "转发到: ${GREEN}$REMOTE_IP:$REMOTE_PORT${NC}"
-        elif [ "$ROLE" -eq 2 ]; then
-            echo -e "配置模式: ${GREEN}传统模式 - 出口服务器 (双端Realm搭建隧道)${NC}"
-            echo -e "监听端口: ${GREEN}$EXIT_LISTEN_PORT${NC}"
-
-            # 显示转发目标
-            if [ -n "$FORWARD_TARGET" ]; then
-                echo -e "转发到: ${GREEN}$FORWARD_TARGET${NC}"
-                # 如果是多地址，显示详细信息
-                if [[ "$FORWARD_TARGET" == *","* ]]; then
-                    echo -e "转发模式: ${YELLOW}负载均衡 (多地址)${NC}"
-                fi
-            else
-                echo -e "${YELLOW}转发目标未配置${NC}"
-            fi
-        fi
     fi
 
     # 显示端口监听状态
@@ -6589,23 +6470,6 @@ service_status() {
                 fi
             fi
         done
-    else
-        # 传统模式：检查传统配置的端口
-        if [ "$ROLE" -eq 1 ] && [ -n "$NAT_LISTEN_PORT" ]; then
-            local display_ip="${NAT_LISTEN_IP:-::}"
-            if $port_check_cmd 2>/dev/null | grep -q ":${NAT_LISTEN_PORT} "; then
-                echo -e "端口 ${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT: ${GREEN}正在监听${NC}"
-            else
-                echo -e "端口 ${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT: ${RED}未监听${NC}"
-            fi
-        elif [ "$ROLE" -eq 2 ] && [ -n "$EXIT_LISTEN_PORT" ]; then
-            local exit_listen_ip="::"
-            if $port_check_cmd 2>/dev/null | grep -q ":${EXIT_LISTEN_PORT} "; then
-                echo -e "端口 ${exit_listen_ip}:$EXIT_LISTEN_PORT: ${GREEN}正在监听${NC}"
-            else
-                echo -e "端口 ${exit_listen_ip}:$EXIT_LISTEN_PORT: ${RED}未监听${NC}"
-            fi
-        fi
     fi
 
     echo ""
@@ -6621,13 +6485,7 @@ cleanup_firewall_rules() {
     # 收集realm配置的端口
     local ports_to_clean=()
 
-    # 从管理配置文件读取端口
-    if [ -f "$MANAGER_CONF" ]; then
-        local nat_port=$(grep "^NAT_LISTEN_PORT=" "$MANAGER_CONF" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
-        local exit_port=$(grep "^EXIT_LISTEN_PORT=" "$MANAGER_CONF" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
-        [ -n "$nat_port" ] && [[ "$nat_port" =~ ^[0-9]+$ ]] && ports_to_clean+=("$nat_port")
-        [ -n "$exit_port" ] && [[ "$exit_port" =~ ^[0-9]+$ ]] && ports_to_clean+=("$exit_port")
-    fi
+
 
     # 从规则文件读取端口
     if [ -d "$RULES_DIR" ]; then
@@ -6909,7 +6767,7 @@ show_config() {
                             local through_display="${THROUGH_IP:-::}"
                             echo -e "    中转: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
                         fi
-                        local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                        local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                         local note_display=""
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
@@ -6931,14 +6789,6 @@ show_config() {
                             proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
                         fi
                         echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
-
-                        if [ "$SECURITY_LEVEL" = "tls_self" ]; then
-                            local display_sni="${TLS_SERVER_NAME:-$DEFAULT_SNI_DOMAIN}"
-                            echo -e "    TLS自签证书 (SNI: $display_sni)"
-                        elif [ "$SECURITY_LEVEL" = "tls_ca" ]; then
-                            echo -e "    TLS CA证书 (域名: $TLS_SERVER_NAME)"
-                            echo -e "    证书文件: $TLS_CERT_PATH"
-                        fi
                         echo ""
                     fi
                 fi
@@ -7081,7 +6931,7 @@ show_brief_status() {
                         fi
                         relay_count=$((relay_count + 1))
                         # 显示详细的转发配置信息
-                        local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                        local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                         local display_target=$(smart_display_target "$REMOTE_HOST")
                         local rule_display_name="$RULE_NAME"
                         local display_ip="${NAT_LISTEN_IP:-::}"
@@ -7123,12 +6973,12 @@ show_brief_status() {
                             if [ "$has_relay_rules" = true ]; then
                                 echo ""
                             fi
-                            echo -e "${GREEN}落地服务器 (双端Realm搭建隧道):${NC}"
+                            echo -e "${GREEN}落地服务器 (双端Realm架构):${NC}"
                             has_exit_rules=true
                         fi
                         exit_count=$((exit_count + 1))
                         # 显示详细的转发配置信息
-                        local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH")
+                        local security_display=$(get_security_display "$SECURITY_LEVEL" "$WS_PATH" "$TLS_SERVER_NAME")
                         # 落地服务器使用FORWARD_TARGET而不是REMOTE_HOST
                         local target_host="${FORWARD_TARGET%:*}"
                         local target_port="${FORWARD_TARGET##*:}"
@@ -7187,81 +7037,41 @@ show_brief_status() {
             done
         fi
     else
-        # 检查是否有传统配置
-        if [ -f "$MANAGER_CONF" ]; then
-            # 有状态文件，显示传统模式
-            source "$MANAGER_CONF" 2>/dev/null
-            if [ "$ROLE" -eq 1 ]; then
-                echo -e "配置模式: ${GREEN}传统模式${NC} - 中转服务器"
-                local display_ip="${NAT_LISTEN_IP:-::}"
-                local through_display="${NAT_THROUGH_IP:-::}"
-                echo -e "中转: ${YELLOW}${NAT_LISTEN_IP:-$display_ip}:$NAT_LISTEN_PORT${NC} → ${YELLOW}$through_display${NC} → ${GREEN}$REMOTE_IP:$REMOTE_PORT${NC}"
-                if [ -n "$SECURITY_LEVEL" ]; then
-                    local security_display=$(get_security_display "${SECURITY_LEVEL:-0}" "")
-                    echo -e "通用配置: ${YELLOW}$security_display${NC}"
-                fi
-            elif [ "$ROLE" -eq 2 ]; then
-                echo -e "配置模式: ${GREEN}传统模式${NC} - 出口服务器 (双端Realm搭建隧道)"
-                local exit_listen_ip="::"
-                echo -e "监听端口: ${YELLOW}${exit_listen_ip}:$EXIT_LISTEN_PORT${NC}"
-                if [ -n "$SECURITY_LEVEL" ]; then
-                    local security_display=$(get_security_display "${SECURITY_LEVEL:-0}" "")
-                    echo -e "通用配置: ${YELLOW}$security_display${NC}"
-                fi
-            fi
-        else
-            # 没有状态文件，显示简化提示
-            echo -e "转发规则: ${YELLOW}暂无${NC} (可通过 '转发配置管理' 添加)"
-        fi
+        # 没有启用的规则
+        echo -e "转发规则: ${YELLOW}暂无${NC} (可通过 '转发配置管理' 添加)"
     fi
     echo ""
-
-
 }
-
 
 # 获取安全级别显示文本
 get_security_display() {
     local security_level="$1"
     local ws_path="$2"
+    local tls_server_name="$3"
 
     case "$security_level" in
         "standard")
             echo "默认传输"
             ;;
         "ws")
-            if [ -n "$ws_path" ]; then
-                echo "WebSocket (路径: $ws_path)"
-            else
-                echo "WebSocket"
-            fi
+            echo "WebSocket (路径: $ws_path)"
             ;;
         "tls_self")
-            echo "TLS自签证书"
+            local display_sni="${tls_server_name:-$DEFAULT_SNI_DOMAIN}"
+            echo "TLS自签证书 (SNI: $display_sni)"
             ;;
         "tls_ca")
-            echo "TLS CA证书"
+            echo "TLS CA证书 (域名: $tls_server_name)"
             ;;
         "ws_tls_self")
-            if [ -n "$ws_path" ]; then
-                echo "tls 自签证书+ws (路径: $ws_path)"
-            else
-                echo "tls 自签证书+ws"
-            fi
+            local display_sni="${tls_server_name:-$DEFAULT_SNI_DOMAIN}"
+            echo "tls 自签证书+ws (SNI: $display_sni) (路径: $ws_path)"
             ;;
         "ws_tls_ca")
-            if [ -n "$ws_path" ]; then
-                echo "tls CA证书+ws (路径: $ws_path)"
-            else
-                echo "tls CA证书+ws"
-            fi
+            echo "tls CA证书+ws (域名: $tls_server_name) (路径: $ws_path)"
             ;;
         "ws_"*)
-            if [ -n "$ws_path" ]; then
-                echo "$security_level (路径: $ws_path)"
-            else
-                echo "$security_level"
-            fi
+            echo "$security_level (路径: $ws_path)"
             ;;
         *)
             echo "$security_level"
@@ -7323,7 +7133,7 @@ show_menu() {
         echo -e "${GREEN}作者主页:https://zywe.de${NC}"
         echo -e "${GREEN}项目开源:https://github.com/zywe03/realm-xwPF${NC}"
         echo -e "${GREEN}一个开箱即用、轻量可靠、灵活可控的 Realm 转发管理工具${NC}"
-        echo -e "${GREEN}原生realm的全部功能+故障转移 | 快捷命令: pf${NC}"
+        echo -e "${GREEN}官方realm的全部功能+故障转移 | 快捷命令: pf${NC}"
 
         # 显示当前状态
         show_brief_status
