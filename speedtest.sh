@@ -1809,7 +1809,7 @@ run_bgp_analysis() {
 
     # 显示图片链接
     if [ -n "$pathimg_url" ]; then
-        echo -e " ${BLUE} 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
+        echo -e " ${BLUE}图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
         echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
     fi
 
@@ -1901,7 +1901,7 @@ generate_bgp_report() {
 
     # 显示图片链接
     if [ -n "$pathimg_url" ]; then
-        echo -e " ${BLUE} 图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
+        echo -e " ${BLUE}图片链接：${NC}${YELLOW}https://bgp.tools$pathimg_url${NC}"
         echo -e "─────────────────────────────────────────────────────────────────"
     fi
 }
@@ -1960,7 +1960,7 @@ run_performance_tests() {
 
 # 生成最终报告
 generate_final_report() {
-    echo -e "${GREEN}========== 网络链路测试功能完整报告 ==========${NC}"
+    echo -e "${GREEN}================== 网络链路测试功能完整报告 ==================${NC}"
     echo ""
 
     # 报告标题
@@ -1988,7 +1988,7 @@ generate_final_report() {
         [ -n "${TEST_RESULTS[route_as_path]}" ] && echo -e " AS路径: ${YELLOW}${TEST_RESULTS[route_as_path]}${NC}"
         [ -n "${TEST_RESULTS[route_isp_path]}" ] && echo -e " 运营商: ${YELLOW}${TEST_RESULTS[route_isp_path]}${NC}"
         [ -n "${TEST_RESULTS[route_geo_path]}" ] && echo -e " 地理路径: ${YELLOW}${TEST_RESULTS[route_geo_path]}${NC}"
-        [ -n "${TEST_RESULTS[route_map_url]}" ] && echo -e " 地图链接: ${BLUE}${TEST_RESULTS[route_map_url]}${NC}"
+        [ -n "${TEST_RESULTS[route_map_url]}" ] && echo -e " ${BLUE}地图链接: ${TEST_RESULTS[route_map_url]}${NC}"
     else
         echo -e " ${RED}路由分析失败或数据不可用${NC}"
     fi
