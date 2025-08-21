@@ -141,24 +141,6 @@ set_test_result() {
     fi
 }
 
-# 辅助函数：格式化显示测试结果
-format_test_result() {
-    local key="$1"
-    local default_msg="$2"
-    if [ -n "${TEST_RESULTS[$key]}" ]; then
-        echo "${TEST_RESULTS[$key]}"
-    else
-        echo "$default_msg"
-    fi
-}
-
-# 初始化测试结果数据结构
-init_test_results() {
-    for key in "${!TEST_RESULTS[@]}"; do
-        TEST_RESULTS["$key"]=""
-    done
-}
-
 # 检查root权限
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -739,6 +721,38 @@ show_progress_bar() {
         sleep 1
     done
     echo ""
+}
+
+# 获取系统和内核信息
+get_system_kernel_info() {
+    # 获取系统信息
+    local system_info="未知"
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        system_info="$NAME $VERSION_ID"
+    fi
+
+    # 获取内核信息
+    local kernel_info=$(uname -r 2>/dev/null || echo "未知")
+
+    echo "${system_info} | 内核: ${kernel_info}"
+}
+
+# 获取TCP缓冲区信息
+get_tcp_buffer_info() {
+    # 获取接收缓冲区
+    local rmem="未知"
+    if [ -f /proc/sys/net/ipv4/tcp_rmem ]; then
+        rmem=$(cat /proc/sys/net/ipv4/tcp_rmem 2>/dev/null || echo "未知")
+    fi
+
+    # 获取发送缓冲区
+    local wmem="未知"
+    if [ -f /proc/sys/net/ipv4/tcp_wmem ]; then
+        wmem=$(cat /proc/sys/net/ipv4/tcp_wmem 2>/dev/null || echo "未知")
+    fi
+
+    echo "rmem:$rmem|wmem:$wmem"
 }
 
 # 获取本机TCP拥塞控制算法和队列信息
@@ -1615,9 +1629,9 @@ run_route_analysis() {
     echo ""
 }
 
-# BGP对等关系分析
+# BGP对等体关系分析
 run_bgp_analysis() {
-    echo -e "${GREEN}🟢 BGP对等关系分析${NC}"
+    echo -e "${GREEN}🟢 BGP对等体关系分析${NC}"
 
     local public_ip=$(get_public_ip)
     if [ -z "$public_ip" ]; then
@@ -1734,17 +1748,34 @@ run_bgp_analysis() {
         total_asn_count=1
     fi
 
+    # 提取上游和同行数量
+    local upstreams_count=""
+    local peers_count=""
+    if [ -n "$as_page" ]; then
+        local connectivity_section=$(echo "$as_page" | sed -n '/<div.*id="connectivity-page"/,/<\/div>/p')
+        upstreams_count=$(echo "$connectivity_section" | grep -A 2 'Upstreams</a>' | grep -o '[0-9]\+' | head -1)
+        peers_count=$(echo "$connectivity_section" | grep -A 1 'Peers</a>' | grep -o '[0-9]\+' | head -1)
+    fi
+
     # 保存结果
     BGP_ASN_DATA="$all_asn_data"
     BGP_TOTAL_COUNT="$total_asn_count"
     BGP_PATHIMG_URL="$pathimg_url"
+    BGP_UPSTREAMS_COUNT="$upstreams_count"
+    BGP_PEERS_COUNT="$peers_count"
     BGP_SUCCESS=true
 
     # 显示BGP分析结果
     echo ""
     echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
-    echo -e "                    ${GREEN}🌐 BGP对等关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
+    echo -e "                    ${GREEN}🌐 BGP对等体关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
     echo -e "${GREEN}─────────────────────────────────────────────────────────────────${NC}"
+
+    # 显示上游和同行数量
+    if [ -n "$upstreams_count" ] && [ -n "$peers_count" ]; then
+        echo -e "上游节点(Upstreams) :${YELLOW}$upstreams_count${NC} │ 对等节点(Peers):${YELLOW}$peers_count${NC}"
+        echo ""
+    fi
 
     # 显示BGP网络拓扑
     if [ -n "$all_asn_data" ] && [ "$total_asn_count" -gt 0 ]; then
@@ -1767,10 +1798,10 @@ run_bgp_analysis() {
                 fi
 
                 case "$current_color" in
-                    "origin") printf "${GREEN}%-9s${NC}" "AS$current_asn" ;;
-                    "tier1") printf "${BLUE}%-9s${NC}" "AS$current_asn" ;;
-                    "other") printf "${WHITE}%-9s${NC}" "AS$current_asn" ;;
-                    *) printf "${YELLOW}%-9s${NC}" "AS$current_asn" ;;
+                    "origin") printf "${GREEN}%-12s${NC}" "AS$current_asn" ;;
+                    "tier1") printf "${BLUE}%-12s${NC}" "AS$current_asn" ;;
+                    "other") printf "${WHITE}%-12s${NC}" "AS$current_asn" ;;
+                    *) printf "${YELLOW}%-12s${NC}" "AS$current_asn" ;;
                 esac
             done
             echo ""
@@ -1791,10 +1822,10 @@ run_bgp_analysis() {
                 fi
 
                 case "$current_color" in
-                    "origin") printf "${GREEN}%-9s${NC}" "$display_name" ;;
-                    "tier1") printf "${BLUE}%-9s${NC}" "$display_name" ;;
-                    "other") printf "${WHITE}%-9s${NC}" "$display_name" ;;
-                    *) printf "${YELLOW}%-9s${NC}" "$display_name" ;;
+                    "origin") printf "${GREEN}%-12s${NC}" "$display_name" ;;
+                    "tier1") printf "${BLUE}%-12s${NC}" "$display_name" ;;
+                    "other") printf "${WHITE}%-12s${NC}" "$display_name" ;;
+                    *) printf "${YELLOW}%-12s${NC}" "$display_name" ;;
                 esac
             done
             echo ""
@@ -1820,7 +1851,7 @@ run_bgp_analysis() {
 generate_bgp_report() {
     # 检查分析结果
     if [ "$BGP_SUCCESS" != true ]; then
-        echo -e "${WHITE}🌐 BGP对等关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
+        echo -e "${WHITE}🌐 BGP对等体关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
         echo -e "─────────────────────────────────────────────────────────────────"
         echo -e " ${RED}BGP分析失败或数据不可用${NC}"
         echo -e "─────────────────────────────────────────────────────────────────"
@@ -1831,10 +1862,18 @@ generate_bgp_report() {
     local all_asn_data="$BGP_ASN_DATA"
     local total_asn_count="$BGP_TOTAL_COUNT"
     local pathimg_url="$BGP_PATHIMG_URL"
+    local upstreams_count="$BGP_UPSTREAMS_COUNT"
+    local peers_count="$BGP_PEERS_COUNT"
 
     # 显示BGP分析结果
-    echo -e "${WHITE}🌐 BGP对等关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
+    echo -e "${WHITE}🌐 BGP对等体关系分析${NC} ${YELLOW}(基于bgp.tools)${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
+
+    # 显示上游和同行数量
+    if [ -n "$upstreams_count" ] && [ -n "$peers_count" ]; then
+        echo -e "上游节点(Upstreams) :${YELLOW}$upstreams_count${NC} │ 对等节点(Peers):${YELLOW}$peers_count${NC}"
+        echo ""
+    fi
 
     # 显示BGP网络拓扑
     if [ -n "$all_asn_data" ] && [ "$total_asn_count" -gt 0 ]; then
@@ -1857,10 +1896,10 @@ generate_bgp_report() {
                 fi
 
                 case "$current_color" in
-                    "origin") printf "${GREEN}%-9s${NC}" "AS$current_asn" ;;
-                    "tier1") printf "${BLUE}%-9s${NC}" "AS$current_asn" ;;
-                    "other") printf "${WHITE}%-9s${NC}" "AS$current_asn" ;;
-                    *) printf "${YELLOW}%-9s${NC}" "AS$current_asn" ;;
+                    "origin") printf "${GREEN}%-12s${NC}" "AS$current_asn" ;;
+                    "tier1") printf "${BLUE}%-12s${NC}" "AS$current_asn" ;;
+                    "other") printf "${WHITE}%-12s${NC}" "AS$current_asn" ;;
+                    *) printf "${YELLOW}%-12s${NC}" "AS$current_asn" ;;
                 esac
             done
             echo ""
@@ -1881,10 +1920,10 @@ generate_bgp_report() {
                 fi
 
                 case "$current_color" in
-                    "origin") printf "${GREEN}%-9s${NC}" "$display_name" ;;
-                    "tier1") printf "${BLUE}%-9s${NC}" "$display_name" ;;
-                    "other") printf "${WHITE}%-9s${NC}" "$display_name" ;;
-                    *) printf "${YELLOW}%-9s${NC}" "$display_name" ;;
+                    "origin") printf "${GREEN}%-12s${NC}" "$display_name" ;;
+                    "tier1") printf "${BLUE}%-12s${NC}" "$display_name" ;;
+                    "other") printf "${WHITE}%-12s${NC}" "$display_name" ;;
+                    *) printf "${YELLOW}%-12s${NC}" "$display_name" ;;
                 esac
             done
             echo ""
@@ -1920,6 +1959,8 @@ BGP_SUCCESS=false
 BGP_ASN_DATA=""
 BGP_TOTAL_COUNT=0
 BGP_PATHIMG_URL=""
+BGP_UPSTREAMS_COUNT=""
+BGP_PEERS_COUNT=""
 
 
 # 主要性能测试函数
@@ -1928,9 +1969,6 @@ run_performance_tests() {
     echo -e "${BLUE}目标: $TARGET_IP:$TARGET_PORT${NC}"
     echo -e "${BLUE}测试时长: ${TEST_DURATION}秒${NC}"
     echo ""
-
-    # 初始化测试结果数据结构
-    init_test_results
 
     # 重置测试结果
     HPING_SUCCESS=false
@@ -1966,7 +2004,7 @@ generate_final_report() {
     # 报告标题
     echo -e "${BLUE}✍️ 参数测试报告${NC}"
     echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e "  源: 客户端 (本机发起测试)"
+    echo -e "  本机（客户端）发起测试"
 
     # 隐藏完整IP地址，只显示前两段
     local masked_ip=$(echo "$TARGET_IP" | awk -F'.' '{print $1"."$2".*.*"}')
@@ -1975,9 +2013,20 @@ generate_final_report() {
     echo -e "  测试方向: 客户端 ↔ 服务端 "
     echo -e "  单项测试时长: ${TEST_DURATION}秒"
 
+    # 显示系统和内核信息
+    local system_kernel_info=$(get_system_kernel_info)
+    echo -e "  系统：${YELLOW}${system_kernel_info}${NC}"
+
     # 获取并显示本机TCP信息
     local local_tcp_info=$(get_local_tcp_info)
     echo -e "  本机：${YELLOW}${local_tcp_info}${NC}（拥塞控制算法+队列）"
+
+    # 显示TCP缓冲区信息
+    local tcp_buffer_info=$(get_tcp_buffer_info)
+    local rmem_info=$(echo "$tcp_buffer_info" | cut -d'|' -f1 | cut -d':' -f2)
+    local wmem_info=$(echo "$tcp_buffer_info" | cut -d'|' -f2 | cut -d':' -f2)
+    echo -e "  TCP接收缓冲区（rmem）：${YELLOW}${rmem_info}${NC}"
+    echo -e "  TCP发送缓冲区（wmem）：${YELLOW}${wmem_info}${NC}"
     echo ""
 
     # 路由分析结果
@@ -1994,110 +2043,76 @@ generate_final_report() {
     fi
     echo -e "─────────────────────────────────────────────────────────────────"
 
-    # BGP对等关系分析结果
+    # BGP对等体关系分析结果
     generate_bgp_report
 
     # 核心性能数据展示
     echo -e "${WHITE}⚡ 网络链路参数分析（基于hping3 & iperf3）${NC}"
-    echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e "    ${WHITE}PING & 抖动${NC}           ${WHITE}⬆️ TCP上行带宽${NC}           ${WHITE}⬇️ TCP下行带宽${NC}"
-    echo -e "─────────────────────  ─────────────────────  ─────────────────────"
+    echo -e "─────────────────────────────────────────────────────────────────────────────────"
+    echo -e "    ${WHITE}PING & 抖动${NC}           ${WHITE}⬆️ TCP上行带宽${NC}                     ${WHITE}⬇️ TCP下行带宽${NC}"
+    echo -e "─────────────────────  ─────────────────────────────  ─────────────────────────────"
 
     # 第一行数据
-    if [ "$HPING_SUCCESS" = true ] && [ -n "${TEST_RESULTS[latency_avg]}" ]; then
-        printf "  平均: ${YELLOW}%-12s${NC}  " "${TEST_RESULTS[latency_avg]}ms"
-    else
-        printf "  ${RED}%-21s${NC}  " "测试失败"
-    fi
-
-    if [ "$TCP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_up_speed_mbps]}" ]; then
-        printf "  ${YELLOW}%s Mbps${NC} (${YELLOW}%s MB/s${NC})  " "${TEST_RESULTS[tcp_up_speed_mbps]}" "${TEST_RESULTS[tcp_up_speed_mibs]}"
-    else
-        printf "  ${RED}%-21s${NC}  " "测试失败"
-    fi
-
-    if [ "$TCP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_down_speed_mbps]}" ]; then
-        printf "  ${YELLOW}%s Mbps${NC} (${YELLOW}%s MB/s${NC})\n" "${TEST_RESULTS[tcp_down_speed_mbps]}" "${TEST_RESULTS[tcp_down_speed_mibs]}"
-    else
-        printf "  ${RED}%-21s${NC}\n" "测试失败"
-    fi
+    printf "  平均: %-12s  " "${TEST_RESULTS[latency_avg]}ms"
+    printf "  %-29s  " "${TEST_RESULTS[tcp_up_speed_mbps]} Mbps (${TEST_RESULTS[tcp_up_speed_mibs]} MB/s)"
+    printf "  %-29s\n" "${TEST_RESULTS[tcp_down_speed_mbps]} Mbps (${TEST_RESULTS[tcp_down_speed_mibs]} MB/s)"
 
     # 第二行数据
-    if [ "$HPING_SUCCESS" = true ] && [ -n "${TEST_RESULTS[latency_min]}" ]; then
-        printf "  最低: ${YELLOW}%-12s${NC}  " "${TEST_RESULTS[latency_min]}ms"
-    else
-        printf "  %-21s  " ""
-    fi
-
-    if [ "$TCP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_up_transfer]}" ]; then
-        printf "  总传输量: ${YELLOW}%-11s${NC}  " "${TEST_RESULTS[tcp_up_transfer]} MB"
-    else
-        printf "  %-21s  " ""
-    fi
-
-    if [ "$TCP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_down_transfer]}" ]; then
-        printf "  总传输量: ${YELLOW}%-11s${NC}\n" "${TEST_RESULTS[tcp_down_transfer]} MB"
-    else
-        printf "  %-21s\n" ""
-    fi
+    printf "  最低: %-12s  " "${TEST_RESULTS[latency_min]}ms"
+    printf "  %-29s  " "总传输量: ${TEST_RESULTS[tcp_up_transfer]} MB"
+    printf "  %-29s\n" "总传输量: ${TEST_RESULTS[tcp_down_transfer]} MB"
 
     # 第三行数据
-    if [ "$HPING_SUCCESS" = true ] && [ -n "${TEST_RESULTS[latency_max]}" ]; then
-        printf "  最高: ${YELLOW}%-12s${NC}  " "${TEST_RESULTS[latency_max]}ms"
-    else
-        printf "  %-21s  " ""
-    fi
-
-    if [ "$TCP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_up_retrans]}" ]; then
-        printf "  重传: ${YELLOW}%-15s${NC}  " "${TEST_RESULTS[tcp_up_retrans]} 次"
-    else
-        printf "  %-21s  " ""
-    fi
-
-    if [ "$TCP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[tcp_down_retrans]}" ]; then
-        printf "  重传: ${YELLOW}%-15s${NC}\n" "${TEST_RESULTS[tcp_down_retrans]} 次"
-    else
-        printf "  %-21s\n" ""
-    fi
+    printf "  最高: %-12s  " "${TEST_RESULTS[latency_max]}ms"
+    printf "  %-29s  " "重传: ${TEST_RESULTS[tcp_up_retrans]} 次"
+    printf "  %-29s\n" "重传: ${TEST_RESULTS[tcp_down_retrans]} 次"
 
     # 第四行数据
-    if [ "$HPING_SUCCESS" = true ] && [ -n "${TEST_RESULTS[latency_jitter]}" ]; then
-        printf "  抖动: ${YELLOW}%-12s${NC}\n" "${TEST_RESULTS[latency_jitter]}ms"
-    else
-        printf "  %-21s\n" ""
-    fi
+    printf "  抖动: %-12s\n" "${TEST_RESULTS[latency_jitter]}ms"
     echo ""
 
-    echo -e "─────────────────────────────────────────────────────────────────"
-    echo -e " 方向     │ 吞吐量                    │ 丢包率        │ 抖动"
-    echo -e "─────────────────────────────────────────────────────────────────"
+    echo -e "─────────────────────────────────────────────────────────────────────────────────────────────"
+    echo -e " 方向       │ 吞吐量                   │ 丢包率                   │ 抖动"
+    echo -e "─────────────────────────────────────────────────────────────────────────────────────────────"
 
     # UDP上行
     if [ "$UDP_SINGLE_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_up_speed_mbps]}" ]; then
-        printf " ⬆️ UDP上行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
-            "${TEST_RESULTS[udp_up_speed_mbps]} Mbps (${TEST_RESULTS[udp_up_speed_mibs]} MB/s)" \
-            "${TEST_RESULTS[udp_up_loss]}" \
-            "${TEST_RESULTS[udp_up_jitter]} ms"
+        local speed_text="${TEST_RESULTS[udp_up_speed_mbps]} Mbps (${TEST_RESULTS[udp_up_speed_mibs]} MB/s)"
+        local loss_text="${TEST_RESULTS[udp_up_loss]}"
+        local jitter_text="${TEST_RESULTS[udp_up_jitter]} ms"
+
+        [ ${#speed_text} -gt 25 ] && speed_text="${speed_text:0:25}"
+        [ ${#loss_text} -gt 25 ] && loss_text="${loss_text:0:25}"
+        [ ${#jitter_text} -gt 25 ] && jitter_text="${jitter_text:0:25}"
+
+        printf " %-11s │ ${YELLOW}%-25s${NC} │ ${YELLOW}%-25s${NC} │ ${YELLOW}%-25s${NC}\n" \
+            "⬆️ UDP上行" "$speed_text" "$loss_text" "$jitter_text"
     else
-        printf " ⬆️ UDP上行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
-            "测试失败" "N/A" "N/A"
+        printf " %-11s │ ${RED}%-25s${NC} │ ${RED}%-25s${NC} │ ${RED}%-25s${NC}\n" \
+            "⬆️ UDP上行" "测试失败" "N/A" "N/A"
     fi
 
     # UDP下行
     if [ "$UDP_DOWNLOAD_SUCCESS" = true ] && [ -n "${TEST_RESULTS[udp_down_speed_mbps]}" ]; then
-        printf " ⬇️ UDP下行   │ ${YELLOW}%-24s${NC} │ ${YELLOW}%-12s${NC} │ ${YELLOW}%-12s${NC}\n" \
-            "${TEST_RESULTS[udp_down_speed_mbps]} Mbps (${TEST_RESULTS[udp_down_speed_mibs]} MB/s)" \
-            "${TEST_RESULTS[udp_down_loss]}" \
-            "${TEST_RESULTS[udp_down_jitter]} ms"
+        local speed_text="${TEST_RESULTS[udp_down_speed_mbps]} Mbps (${TEST_RESULTS[udp_down_speed_mibs]} MB/s)"
+        local loss_text="${TEST_RESULTS[udp_down_loss]}"
+        local jitter_text="${TEST_RESULTS[udp_down_jitter]} ms"
+
+        [ ${#speed_text} -gt 25 ] && speed_text="${speed_text:0:25}"
+        [ ${#loss_text} -gt 25 ] && loss_text="${loss_text:0:25}"
+        [ ${#jitter_text} -gt 25 ] && jitter_text="${jitter_text:0:25}"
+
+        printf " %-11s │ ${YELLOW}%-25s${NC} │ ${YELLOW}%-25s${NC} │ ${YELLOW}%-25s${NC}\n" \
+            "⬇️ UDP下行" "$speed_text" "$loss_text" "$jitter_text"
     else
-        printf " ⬇️ UDP下行   │ ${RED}%-24s${NC} │ ${RED}%-12s${NC} │ ${RED}%-12s${NC}\n" \
-            "测试失败" "N/A" "N/A"
+        printf " %-11s │ ${RED}%-25s${NC} │ ${RED}%-25s${NC} │ ${RED}%-25s${NC}\n" \
+            "⬇️ UDP下行" "测试失败" "N/A" "N/A"
     fi
 
     echo ""
     echo -e "─────────────────────────────────────────────────────────────────"
 
-    echo -e "测试完成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+    echo -e "测试完成时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S') | 脚本开源地址：https://github.com/zywe03/realm-xwPF"
     echo -e "${WHITE}按任意键返回主菜单...${NC}"
     read -n 1 -s
 }
