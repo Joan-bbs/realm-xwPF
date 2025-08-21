@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.7.0"
+SCRIPT_VERSION="v1.7.5"
 
 # 临时配置变量（仅在配置过程中使用）
 NAT_LISTEN_PORT=""
@@ -22,7 +22,7 @@ WS_PATH=""         # WebSocket路径
 RULE_ID=""
 RULE_NAME=""
 
-# 依赖工具列表（统一管理）
+# 依赖工具列表
 REQUIRED_TOOLS=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
 
 # 通用的字段初始化函数
@@ -98,7 +98,7 @@ RULES_DIR="${CONFIG_DIR}/rules"
 # 默认tls域名（双端Realm架构需要相同SNI）
 DEFAULT_SNI_DOMAIN="www.tesla.com"
 
-# 统一的realm配置模板（避免重复定义）
+# 统一的realm配置模板
 generate_base_config_template() {
     cat <<EOF
 {
@@ -150,8 +150,6 @@ $base_config,
 }
 EOF
 }
-
-
 
 # 检查root权限
 check_root() {
@@ -419,7 +417,7 @@ check_firewall() {
 check_connectivity() {
     local target="$1"
     local port="$2"
-    local timeout=3
+    local timeout="${3:-3}"  # 支持可选的超时参数，默认3秒
 
     # 检查参数
     if [ -z "$target" ] || [ -z "$port" ]; then
@@ -427,7 +425,7 @@ check_connectivity() {
     fi
 
     # 使用nc检测连通性（netcat-openbsd已确保安装）
-    nc -z -w$timeout "$target" "$port" >/dev/null 2>&1
+    nc -z -w"$timeout" "$target" "$port" >/dev/null 2>&1
     return $?
 }
 
@@ -818,83 +816,191 @@ read_and_check_relay_rule() {
     fi
 }
 
-# 列出所有规则（用于管理操作）
-list_rules_for_management() {
+# 通用规则列表显示函数
+# 参数: display_mode (management|mptcp|proxy)
+list_rules_with_info() {
+    local display_mode="${1:-management}"
+
     if [ ! -d "$RULES_DIR" ] || [ -z "$(ls -A "$RULES_DIR"/*.conf 2>/dev/null)" ]; then
         echo -e "${BLUE}暂无转发规则${NC}"
         return 1
     fi
 
-    # 中转服务器规则
+    # 根据显示模式设置标题
+    case "$display_mode" in
+        "mptcp")
+            echo -e "${BLUE}当前规则列表:${NC}"
+            echo ""
+            ;;
+        "proxy")
+            echo -e "${BLUE}当前规则列表:${NC}"
+            echo ""
+            ;;
+        "management"|*)
+            # 管理模式显示分类标题
+            ;;
+    esac
+
+    # 处理中转服务器规则（仅管理模式需要分类显示）
     local has_relay_rules=false
     local relay_count=0
+
+    if [ "$display_mode" = "management" ]; then
+        for rule_file in "${RULES_DIR}"/rule-*.conf; do
+            if [ -f "$rule_file" ]; then
+                if read_and_check_relay_rule "$rule_file"; then
+                    if [ "$has_relay_rules" = false ]; then
+                        echo -e "${GREEN}中转服务器:${NC}"
+                        has_relay_rules=true
+                    fi
+                    relay_count=$((relay_count + 1))
+
+                    # 显示规则信息
+                    display_single_rule_info "$rule_file" "$display_mode"
+                fi
+            fi
+        done
+    fi
+
+    # 处理所有规则（非管理模式）或落地服务器规则（管理模式）
+    local has_exit_rules=false
+    local exit_count=0
+    local has_rules=false
+
     for rule_file in "${RULES_DIR}"/rule-*.conf; do
         if [ -f "$rule_file" ]; then
-            if read_and_check_relay_rule "$rule_file"; then
-                if [ "$has_relay_rules" = false ]; then
-                    echo -e "${GREEN}中转服务器:${NC}"
-                    has_relay_rules=true
+            if read_rule_file "$rule_file"; then
+                has_rules=true
+
+                if [ "$display_mode" = "management" ]; then
+                    # 管理模式：只显示落地服务器规则
+                    if [ "$RULE_ROLE" = "2" ]; then
+                        if [ "$has_exit_rules" = false ]; then
+                            if [ "$has_relay_rules" = true ]; then
+                                echo ""
+                            fi
+                            echo -e "${GREEN}落地服务器 (双端Realm架构):${NC}"
+                            has_exit_rules=true
+                        fi
+                        exit_count=$((exit_count + 1))
+                        display_single_rule_info "$rule_file" "$display_mode"
+                    fi
+                else
+                    # 其他模式：显示所有规则
+                    display_single_rule_info "$rule_file" "$display_mode"
                 fi
-                relay_count=$((relay_count + 1))
-
-                local status_color="${GREEN}"
-                local status_text="启用"
-                if [ "$ENABLED" != "true" ]; then
-                    status_color="${RED}"
-                    status_text="禁用"
-                fi
-
-                local display_target=$(smart_display_target "$REMOTE_HOST")
-                local rule_display_name="$RULE_NAME"
-
-                # 构建负载均衡信息
-                local balance_mode="${BALANCE_MODE:-off}"
-                local balance_info=$(get_balance_info_display "$REMOTE_HOST" "$balance_mode")
-
-                local through_display="${THROUGH_IP:-::}"
-                echo -e "  ID ${BLUE}$RULE_ID${NC}: ${GREEN}$rule_display_name${NC} ($LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT) [${status_color}$status_text${NC}]$balance_info"
             fi
         fi
     done
 
-    # 落地服务器规则
-    local has_exit_rules=false
-    local exit_count=0
-    for rule_file in "${RULES_DIR}"/rule-*.conf; do
-        if [ -f "$rule_file" ]; then
-            if read_rule_file "$rule_file" && [ "$RULE_ROLE" = "2" ]; then
-                if [ "$has_exit_rules" = false ]; then
-                    if [ "$has_relay_rules" = true ]; then
-                        echo ""
-                    fi
-                    echo -e "${GREEN}落地服务器 (双端Realm架构):${NC}"
-                    has_exit_rules=true
-                fi
-                exit_count=$((exit_count + 1))
+    if [ "$display_mode" != "management" ] && [ "$has_rules" = false ]; then
+        echo -e "${BLUE}暂无转发规则${NC}"
+        return 1
+    fi
 
-                local status_color="${GREEN}"
-                local status_text="启用"
-                if [ "$ENABLED" != "true" ]; then
-                    status_color="${RED}"
-                    status_text="禁用"
-                fi
+    return 0
+}
 
-                # 落地服务器使用FORWARD_TARGET而不是REMOTE_HOST
+# 获取规则状态显示信息（MPTCP和Proxy状态）
+get_rule_status_display() {
+    local security_display="$1"
+    local note_display="$2"
+
+    # 添加MPTCP状态显示
+    local mptcp_mode="${MPTCP_MODE:-off}"
+    local mptcp_display=""
+    if [ "$mptcp_mode" != "off" ]; then
+        local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
+        local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+        mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
+    fi
+
+    # 添加Proxy状态显示
+    local proxy_mode="${PROXY_MODE:-off}"
+    local proxy_display=""
+    if [ "$proxy_mode" != "off" ]; then
+        local proxy_text=$(get_proxy_mode_display "$proxy_mode")
+        local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+        proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
+    fi
+
+    echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+}
+
+# 显示单个规则信息的辅助函数
+display_single_rule_info() {
+    local rule_file="$1"
+    local display_mode="$2"
+
+    if ! read_rule_file "$rule_file"; then
+        return 1
+    fi
+
+    local status_color="${GREEN}"
+    local status_text="启用"
+    if [ "$ENABLED" != "true" ]; then
+        status_color="${RED}"
+        status_text="禁用"
+    fi
+
+    # 基础信息显示
+    case "$display_mode" in
+        "mptcp")
+            local mptcp_mode="${MPTCP_MODE:-off}"
+            local mptcp_display=$(get_mptcp_mode_display "$mptcp_mode")
+            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
+            echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME | 状态: ${status_color}$status_text${NC} | MPTCP: ${mptcp_color}$mptcp_display${NC}"
+            ;;
+        "proxy")
+            local proxy_mode="${PROXY_MODE:-off}"
+            local proxy_display=$(get_proxy_mode_display "$proxy_mode")
+            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
+            echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME | 状态: ${status_color}$status_text${NC} | Proxy: ${proxy_color}$proxy_display${NC}"
+            ;;
+        "management"|*)
+            if [ "$RULE_ROLE" = "2" ]; then
+                # 落地服务器使用FORWARD_TARGET
                 local target_host="${FORWARD_TARGET%:*}"
                 local target_port="${FORWARD_TARGET##*:}"
                 local display_target=$(smart_display_target "$target_host")
                 local rule_display_name="$RULE_NAME"
-
                 # 落地服务器不需要负载均衡信息
                 local balance_info=""
-
                 echo -e "  ID ${BLUE}$RULE_ID${NC}: ${GREEN}$rule_display_name${NC} ($LISTEN_PORT → $display_target:$target_port) [${status_color}$status_text${NC}]$balance_info"
+            else
+                # 中转服务器
+                local display_target=$(smart_display_target "$REMOTE_HOST")
+                local rule_display_name="$RULE_NAME"
+                # 构建负载均衡信息
+                local balance_mode="${BALANCE_MODE:-off}"
+                local balance_info=$(get_balance_info_display "$REMOTE_HOST" "$balance_mode")
+                local through_display="${THROUGH_IP:-::}"
+                echo -e "  ID ${BLUE}$RULE_ID${NC}: ${GREEN}$rule_display_name${NC} ($LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT) [${status_color}$status_text${NC}]$balance_info"
             fi
-        fi
-    done
+            return 0  # 管理模式不需要额外的转发信息显示
+            ;;
+    esac
 
-    return 0
+    # 显示转发信息（仅用于mptcp和proxy模式）
+    if [ "$RULE_ROLE" = "2" ]; then
+        # 落地服务器使用FORWARD_TARGET
+        local target_host="${FORWARD_TARGET%:*}"
+        local target_port="${FORWARD_TARGET##*:}"
+        local display_target=$(smart_display_target "$target_host")
+        local display_ip="::"
+        echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
+    else
+        # 中转服务器使用REMOTE_HOST
+        local display_target=$(smart_display_target "$REMOTE_HOST")
+        local display_ip="${NAT_LISTEN_IP:-::}"
+        local through_display="${THROUGH_IP:-::}"
+        echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
+    fi
+    echo ""
 }
+
+
+
 
 # 根据序号获取规则ID
 get_rule_id_by_index() {
@@ -1714,23 +1820,8 @@ rules_management_menu() {
                             if [ -n "$RULE_NOTE" ]; then
                                 note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                             fi
-                            # 添加MPTCP状态显示
-                            local mptcp_mode="${MPTCP_MODE:-off}"
-                            local mptcp_display=""
-                            if [ "$mptcp_mode" != "off" ]; then
-                                local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
-                                local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-                                mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
-                            fi
-                            # 添加Proxy状态显示
-                            local proxy_mode="${PROXY_MODE:-off}"
-                            local proxy_display=""
-                            if [ "$proxy_mode" != "off" ]; then
-                                local proxy_text=$(get_proxy_mode_display "$proxy_mode")
-                                local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-                                proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
-                            fi
-                            echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+                            # 显示状态信息
+                            get_rule_status_display "$security_display" "$note_display"
 
                         fi
                     fi
@@ -1763,23 +1854,8 @@ rules_management_menu() {
                             if [ -n "$RULE_NOTE" ]; then
                                 note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                             fi
-                            # 添加MPTCP状态显示
-                            local mptcp_mode="${MPTCP_MODE:-off}"
-                            local mptcp_display=""
-                            if [ "$mptcp_mode" != "off" ]; then
-                                local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
-                                local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-                                mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
-                            fi
-                            # 添加Proxy状态显示
-                            local proxy_mode="${PROXY_MODE:-off}"
-                            local proxy_display=""
-                            if [ "$proxy_mode" != "off" ]; then
-                                local proxy_text=$(get_proxy_mode_display "$proxy_mode")
-                                local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-                                proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
-                            fi
-                            echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+                            # 显示状态信息
+                            get_rule_status_display "$security_display" "$note_display"
 
                         fi
                     fi
@@ -1871,7 +1947,7 @@ rules_management_menu() {
             3)
                 echo -e "${YELLOW}=== 删除配置 ===${NC}"
                 echo ""
-                if list_rules_for_management; then
+                if list_rules_with_info "management"; then
                     echo ""
                     read -p "请输入要删除的规则ID(多ID使用逗号,分隔): " rule_input
 
@@ -1904,7 +1980,7 @@ rules_management_menu() {
             4)
                 echo -e "${YELLOW}=== 启用/禁用中转规则 ===${NC}"
                 echo ""
-                if list_rules_for_management; then
+                if list_rules_with_info "management"; then
                     echo ""
                     read -p "请输入要切换状态的规则ID: " rule_id
                     if [[ "$rule_id" =~ ^[0-9]+$ ]]; then
@@ -2374,7 +2450,7 @@ mptcp_management_menu() {
         echo ""
 
         # 显示规则列表和MPTCP状态
-        if ! list_rules_for_mptcp_management; then
+        if ! list_rules_with_info "mptcp"; then
             echo ""
             read -p "按回车键返回..."
             return
@@ -2447,64 +2523,6 @@ mptcp_management_menu() {
         fi
         read -p "按回车键继续..."
     done
-}
-
-# 列出规则用于MPTCP管理
-list_rules_for_mptcp_management() {
-    if [ ! -d "$RULES_DIR" ] || [ -z "$(ls -A "$RULES_DIR"/*.conf 2>/dev/null)" ]; then
-        echo -e "${BLUE}暂无转发规则${NC}"
-        return 1
-    fi
-
-    echo -e "${BLUE}当前规则列表:${NC}"
-    echo ""
-
-    local has_rules=false
-    for rule_file in "${RULES_DIR}"/rule-*.conf; do
-        if [ -f "$rule_file" ]; then
-            if read_rule_file "$rule_file"; then
-                has_rules=true
-
-                local status_color="${GREEN}"
-                local status_text="启用"
-                if [ "$ENABLED" != "true" ]; then
-                    status_color="${RED}"
-                    status_text="禁用"
-                fi
-
-                # 获取MPTCP模式
-                local mptcp_mode="${MPTCP_MODE:-off}"
-                local mptcp_display=$(get_mptcp_mode_display "$mptcp_mode")
-                local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-
-                echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME | 状态: ${status_color}$status_text${NC} | MPTCP: ${mptcp_color}$mptcp_display${NC}"
-
-                # 显示转发信息
-                if [ "$RULE_ROLE" = "2" ]; then
-                    # 落地服务器使用FORWARD_TARGET
-                    local target_host="${FORWARD_TARGET%:*}"
-                    local target_port="${FORWARD_TARGET##*:}"
-                    local display_target=$(smart_display_target "$target_host")
-                    local display_ip="::"
-                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
-                else
-                    # 中转服务器使用REMOTE_HOST
-                    local display_target=$(smart_display_target "$REMOTE_HOST")
-                    local display_ip="${NAT_LISTEN_IP:-::}"
-                    local through_display="${THROUGH_IP:-::}"
-                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
-                fi
-                echo ""
-            fi
-        fi
-    done
-
-    if [ "$has_rules" = false ]; then
-        echo -e "${BLUE}暂无有效规则${NC}"
-        return 1
-    fi
-
-    return 0
 }
 
 # 批量设置MPTCP模式
@@ -3024,31 +3042,6 @@ show_mptcp_detailed_status() {
     echo ""
     ip mptcp monitor || echo -e "  ${YELLOW}MPTCP事件监控不可用${NC}"
 }
-
-# 验证IP地址格式
-validate_ip_address() {
-    local ip="$1"
-
-    # IPv4地址验证
-    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        local IFS='.'
-        local -a octets=($ip)
-        for octet in "${octets[@]}"; do
-            if [ "$octet" -gt 255 ]; then
-                return 1
-            fi
-        done
-        return 0
-    fi
-
-    # IPv6地址验证
-    if [[ $ip =~ ^[0-9a-fA-F:]+$ ]] && [[ $ip == *":"* ]]; then
-        return 0
-    fi
-
-    return 1
-}
-
 #--- Proxy管理功能 ---
 
 # 获取Proxy模式显示文本
@@ -3120,7 +3113,7 @@ proxy_management_menu() {
         echo ""
 
         # 显示规则列表和Proxy状态
-        if ! list_rules_for_proxy_management; then
+        if ! list_rules_with_info "proxy"; then
             echo ""
             read -p "按回车键返回..."
             return
@@ -3192,63 +3185,8 @@ proxy_management_menu() {
     done
 }
 
-# 列出规则用于Proxy管理
-list_rules_for_proxy_management() {
-    if [ ! -d "$RULES_DIR" ] || [ -z "$(ls -A "$RULES_DIR"/*.conf 2>/dev/null)" ]; then
-        echo -e "${BLUE}暂无转发规则${NC}"
-        return 1
-    fi
 
-    echo -e "${BLUE}当前规则列表:${NC}"
-    echo ""
 
-    local has_rules=false
-    for rule_file in "${RULES_DIR}"/rule-*.conf; do
-        if [ -f "$rule_file" ]; then
-            if read_rule_file "$rule_file"; then
-                has_rules=true
-
-                local status_color="${GREEN}"
-                local status_text="启用"
-                if [ "$ENABLED" != "true" ]; then
-                    status_color="${RED}"
-                    status_text="禁用"
-                fi
-
-                # 获取Proxy模式
-                local proxy_mode="${PROXY_MODE:-off}"
-                local proxy_display=$(get_proxy_mode_display "$proxy_mode")
-                local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-
-                echo -e "ID ${BLUE}$RULE_ID${NC}: $RULE_NAME | 状态: ${status_color}$status_text${NC} | Proxy: ${proxy_color}$proxy_display${NC}"
-
-                # 显示转发信息
-                if [ "$RULE_ROLE" = "2" ]; then
-                    # 落地服务器使用FORWARD_TARGET
-                    local target_host="${FORWARD_TARGET%:*}"
-                    local target_port="${FORWARD_TARGET##*:}"
-                    local display_target=$(smart_display_target "$target_host")
-                    local display_ip="::"
-                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $display_target:$target_port"
-                else
-                    # 中转服务器使用REMOTE_HOST
-                    local display_target=$(smart_display_target "$REMOTE_HOST")
-                    local display_ip="${NAT_LISTEN_IP:-::}"
-                    local through_display="${THROUGH_IP:-::}"
-                    echo -e "  监听: ${LISTEN_IP:-$display_ip}:$LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT"
-                fi
-                echo ""
-            fi
-        fi
-    done
-
-    if [ "$has_rules" = false ]; then
-        echo -e "${BLUE}暂无有效规则${NC}"
-        return 1
-    fi
-
-    return 0
-}
 
 # 批量设置Proxy模式
 batch_set_proxy_mode() {
@@ -6421,23 +6359,8 @@ service_status() {
                     if [ -n "$RULE_NOTE" ]; then
                         note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                     fi
-                    # 添加MPTCP状态显示
-                    local mptcp_mode="${MPTCP_MODE:-off}"
-                    local mptcp_display=""
-                    if [ "$mptcp_mode" != "off" ]; then
-                        local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
-                        local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-                        mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
-                    fi
-                    # 添加Proxy状态显示
-                    local proxy_mode="${PROXY_MODE:-off}"
-                    local proxy_display=""
-                    if [ "$proxy_mode" != "off" ]; then
-                        local proxy_text=$(get_proxy_mode_display "$proxy_mode")
-                        local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-                        proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
-                    fi
-                    echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+                    # 显示状态信息
+                    get_rule_status_display "$security_display" "$note_display"
 
                 fi
             fi
@@ -6772,23 +6695,8 @@ show_config() {
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                         fi
-                        # 添加MPTCP状态显示
-                        local mptcp_mode="${MPTCP_MODE:-off}"
-                        local mptcp_display=""
-                        if [ "$mptcp_mode" != "off" ]; then
-                            local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
-                            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-                            mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
-                        fi
-                        # 添加Proxy状态显示
-                        local proxy_mode="${PROXY_MODE:-off}"
-                        local proxy_display=""
-                        if [ "$proxy_mode" != "off" ]; then
-                            local proxy_text=$(get_proxy_mode_display "$proxy_mode")
-                            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-                            proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
-                        fi
-                        echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+                        # 显示状态信息
+                        get_rule_status_display "$security_display" "$note_display"
                         echo ""
                     fi
                 fi
@@ -6941,23 +6849,8 @@ show_brief_status() {
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                         fi
-                        # 添加MPTCP状态显示
-                        local mptcp_mode="${MPTCP_MODE:-off}"
-                        local mptcp_display=""
-                        if [ "$mptcp_mode" != "off" ]; then
-                            local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
-                            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-                            mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
-                        fi
-                        # 添加Proxy状态显示
-                        local proxy_mode="${PROXY_MODE:-off}"
-                        local proxy_display=""
-                        if [ "$proxy_mode" != "off" ]; then
-                            local proxy_text=$(get_proxy_mode_display "$proxy_mode")
-                            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-                            proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
-                        fi
-                        echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+                        # 显示状态信息
+                        get_rule_status_display "$security_display" "$note_display"
 
                     fi
                 fi
@@ -6990,23 +6883,8 @@ show_brief_status() {
                         if [ -n "$RULE_NOTE" ]; then
                             note_display=" | 备注: ${GREEN}$RULE_NOTE${NC}"
                         fi
-                        # 添加MPTCP状态显示
-                        local mptcp_mode="${MPTCP_MODE:-off}"
-                        local mptcp_display=""
-                        if [ "$mptcp_mode" != "off" ]; then
-                            local mptcp_text=$(get_mptcp_mode_display "$mptcp_mode")
-                            local mptcp_color=$(get_mptcp_mode_color "$mptcp_mode")
-                            mptcp_display=" | MPTCP: ${mptcp_color}$mptcp_text${NC}"
-                        fi
-                        # 添加Proxy状态显示
-                        local proxy_mode="${PROXY_MODE:-off}"
-                        local proxy_display=""
-                        if [ "$proxy_mode" != "off" ]; then
-                            local proxy_text=$(get_proxy_mode_display "$proxy_mode")
-                            local proxy_color=$(get_proxy_mode_color "$proxy_mode")
-                            proxy_display=" | Proxy: ${proxy_color}$proxy_text${NC}"
-                        fi
-                        echo -e "    安全: ${YELLOW}$security_display${NC}${mptcp_display}${proxy_display}${note_display}"
+                        # 显示状态信息
+                        get_rule_status_display "$security_display" "$note_display"
 
                     fi
                 fi
@@ -7668,8 +7546,8 @@ if ! flock -n 200; then
     exit 0
 fi
 
-# 健康检查函数
-check_target_health() {
+# 健康检查函数（统一使用check_connectivity）
+check_connectivity() {
     local target="$1"
     local port="$2"
     local timeout="${3:-3}"
@@ -7754,7 +7632,7 @@ for rule_file in "$RULES_DIR"/rule-*.conf; do
         fi
 
         # 执行健康检查
-        if check_target_health "$target" "$REMOTE_PORT" "${CONNECTION_TIMEOUT:-3}"; then
+        if check_connectivity "$target" "$REMOTE_PORT" "${CONNECTION_TIMEOUT:-3}"; then
             # 检查成功
             success_count=$((success_count + 1))
             fail_count=0
@@ -8149,31 +8027,6 @@ configure_port_group_weights() {
     preview_port_group_weight_config "$port" "$rule_name" "$weight_input" "${targets[@]}"
 }
 
-# 配置规则权重（保留原函数作为兼容）
-configure_rule_weights() {
-    local rule_file="$1"
-    local rule_name="$2"
-
-    if ! read_rule_file "$rule_file"; then
-        echo -e "${RED}读取规则文件失败${NC}"
-        read -p "按回车键返回..."
-        return
-    fi
-
-    # 如果是单目标，提示无需配置权重
-    IFS=',' read -ra host_array <<< "$REMOTE_HOST"
-    local target_count=${#host_array[@]}
-
-    if [ "$target_count" -eq 1 ]; then
-        echo -e "${YELLOW}该规则只有一个目标服务器，无需配置权重${NC}"
-        read -p "按回车键返回..."
-        return
-    fi
-
-    # 调用端口组权重配置
-    configure_port_group_weights "$LISTEN_PORT" "$rule_name" "$REMOTE_HOST:$REMOTE_PORT" "$WEIGHTS"
-}
-
 # 验证权重输入
 validate_weight_input() {
     local weight_input="$1"
@@ -8300,25 +8153,6 @@ preview_port_group_weight_config() {
     fi
 }
 
-# 预览权重配置（保留原函数作为兼容）
-preview_weight_config() {
-    local rule_file="$1"
-    local rule_name="$2"
-    local weight_input="$3"
-    shift 3
-    local host_array=("$@")
-
-    # 重新读取规则文件获取端口信息
-    if ! read_rule_file "$rule_file"; then
-        echo -e "${RED}读取规则文件失败${NC}"
-        read -p "按回车键返回..."
-        return
-    fi
-
-    # 调用端口组权重预览
-    preview_port_group_weight_config "$LISTEN_PORT" "$rule_name" "$weight_input" "${host_array[@]}"
-}
-
 # 应用端口组权重配置
 apply_port_group_weight_config() {
     local port="$1"
@@ -8392,22 +8226,6 @@ apply_port_group_weight_config() {
     fi
 
     read -p "按回车键返回..."
-}
-
-# 应用权重配置（保留原函数作为兼容）
-apply_weight_config() {
-    local rule_file="$1"
-    local weight_input="$2"
-
-    # 读取规则文件获取端口信息
-    if ! read_rule_file "$rule_file"; then
-        echo -e "${RED}读取规则文件失败${NC}"
-        read -p "按回车键返回..."
-        return
-    fi
-
-    # 调用端口组权重应用
-    apply_port_group_weight_config "$LISTEN_PORT" "$weight_input"
 }
 
 main "$@"
