@@ -297,8 +297,6 @@ ROLE=$ROLE
 INSTALL_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
 # 使用全局版本变量
 
-
-
 # 新增配置选项
 SECURITY_LEVEL=$SECURITY_LEVEL
 TLS_CERT_PATH=$TLS_CERT_PATH
@@ -613,9 +611,6 @@ manage_log_size() {
         fi
     fi
 }
-
-
-
 
 # 生成转发endpoints配置
 generate_forward_endpoints_config() {
@@ -3415,272 +3410,144 @@ load_balance_management_menu() {
             return
         fi
 
-        # 只显示中转服务器规则（因为只有中转服务器需要负载均衡）
-        local has_relay_rules=false
+        # 按端口分组收集中转服务器规则，只显示有多个服务器的端口组
+        declare -A port_groups
+        declare -A port_configs
+        declare -A port_balance_modes
+        declare -A port_weights
+        declare -A port_failover_status
+
+        # 收集所有中转服务器规则
         for rule_file in "${RULES_DIR}"/rule-*.conf; do
             if [ -f "$rule_file" ]; then
-                if read_rule_file "$rule_file"; then
+                if read_rule_file "$rule_file" && [ "$RULE_ROLE" = "1" ]; then
+                    local port_key="$LISTEN_PORT"
 
-                    if [ "$RULE_ROLE" = "1" ]; then
-                    if [ "$has_relay_rules" = false ]; then
-                        echo -e "${GREEN}中转服务器:${NC}"
-                        has_relay_rules=true
+                    # 存储端口配置（使用第一个规则的配置作为基准）
+                    if [ -z "${port_configs[$port_key]}" ]; then
+                        port_configs[$port_key]="$RULE_NAME"
+                        port_balance_modes[$port_key]="${BALANCE_MODE:-off}"
+                        port_weights[$port_key]="$WEIGHTS"
+                        port_failover_status[$port_key]="${FAILOVER_ENABLED:-false}"
                     fi
 
-                    local status_color="${GREEN}"
-                    local status_text="启用"
-                    if [ "$ENABLED" != "true" ]; then
-                        status_color="${RED}"
-                        status_text="禁用"
-                    fi
-
-                    local display_target=$(smart_display_target "$REMOTE_HOST")
-
-                    # 构建负载均衡信息
-                    local balance_mode="${BALANCE_MODE:-off}"
-                    local balance_info=$(get_balance_info_display "$REMOTE_HOST" "$balance_mode")
-
-                    # 检查是否属于负载均衡组（同端口有多个中转规则或单规则多地址）
-                    local is_load_balance_group=false
-                    local same_port_count=0
-                    local total_targets=1
-
-                    # 检查同端口的规则数量
-                    for check_rule_file in "${RULES_DIR}"/rule-*.conf; do
-                        if [ -f "$check_rule_file" ]; then
-                            if grep -q "^RULE_ROLE=\"1\"" "$check_rule_file" && grep -q "^LISTEN_PORT=\"$LISTEN_PORT\"" "$check_rule_file"; then
-                                same_port_count=$((same_port_count + 1))
-                            fi
-                        fi
-                    done
-
-                    # 检查当前规则是否有多个地址
+                    # 处理REMOTE_HOST中的多个地址
                     if [[ "$REMOTE_HOST" == *","* ]]; then
                         IFS=',' read -ra host_array <<< "$REMOTE_HOST"
-                        total_targets=${#host_array[@]}
-                    fi
-
-                    # 判断是否为负载均衡组：同端口多规则 或 单规则多地址
-                    if [ $same_port_count -gt 1 ] || [ $total_targets -gt 1 ]; then
-                        is_load_balance_group=true
-                    fi
-
-                    # 只有负载均衡组才显示权重信息
-                    if [ "$is_load_balance_group" = true ] && [ "$balance_mode" != "off" ] && [ -n "$WEIGHTS" ]; then
-                        # 计算当前规则在负载均衡组中的索引
-                        local rule_index=0
-                        local current_port="$LISTEN_PORT"
-                        local current_remote="$REMOTE_HOST"
-
-                        # 按规则ID顺序查找当前规则在同端口组中的位置
-                        for check_file in "${RULES_DIR}"/rule-*.conf; do
-                            if [ -f "$check_file" ]; then
-                                if grep -q "^RULE_ROLE=\"1\"" "$check_file" && grep -q "^LISTEN_PORT=\"$current_port\"" "$check_file"; then
-                                    local file_remote=$(grep "^REMOTE_HOST=" "$check_file" | cut -d'"' -f2)
-                                    local file_id=$(grep "^RULE_ID=" "$check_file" | cut -d'=' -f2)
-
-                                    if [ "$file_id" = "$RULE_ID" ]; then
-                                        break
-                                    fi
-                                    rule_index=$((rule_index + 1))
+                        for host in "${host_array[@]}"; do
+                            local target="$host:$REMOTE_PORT"
+                            if [[ "${port_groups[$port_key]}" != *"$target"* ]]; then
+                                if [ -z "${port_groups[$port_key]}" ]; then
+                                    port_groups[$port_key]="$target"
+                                else
+                                    port_groups[$port_key]="${port_groups[$port_key]},$target"
                                 fi
                             fi
                         done
-
-                        # 解析权重信息，智能获取当前规则的权重
-                        local current_weight=1
-                        if [[ "$WEIGHTS" == *","* ]]; then
-                            # 完整权重字符串，按索引提取
-                            IFS=',' read -ra weight_array <<< "$WEIGHTS"
-                            current_weight="${weight_array[$rule_index]:-1}"
-                        else
-                            # 单个权重值，直接使用
-                            current_weight="${WEIGHTS:-1}"
-                        fi
-
-                        # 计算总权重（需要获取完整权重信息）
-                        local total_weight=0
-                        local full_weights=""
-
-                        # 查找同端口负载均衡组的完整权重信息
-                        local current_port="$LISTEN_PORT"
-                        for check_rule_file in "${RULES_DIR}"/rule-*.conf; do
-                            if [ -f "$check_rule_file" ]; then
-                                if grep -q "^RULE_ROLE=\"1\"" "$check_rule_file" && grep -q "^LISTEN_PORT=\"$current_port\"" "$check_rule_file"; then
-                                    local temp_weights=$(grep "^WEIGHTS=" "$check_rule_file" | cut -d'"' -f2)
-                                    if [[ "$temp_weights" == *","* ]]; then
-                                        full_weights="$temp_weights"
-                                        break
-                                    fi
-                                fi
-                            fi
-                        done
-
-                        # 使用完整权重计算总权重
-                        if [ -n "$full_weights" ]; then
-                            IFS=',' read -ra full_weight_array <<< "$full_weights"
-                            for w in "${full_weight_array[@]}"; do
-                                total_weight=$((total_weight + w))
-                            done
-                        else
-                            # 回退：计算同端口所有规则的权重总和
-                            for check_rule_file in "${RULES_DIR}"/rule-*.conf; do
-                                if [ -f "$check_rule_file" ]; then
-                                    if grep -q "^RULE_ROLE=\"1\"" "$check_rule_file" && grep -q "^LISTEN_PORT=\"$current_port\"" "$check_rule_file"; then
-                                        local temp_weight=$(grep "^WEIGHTS=" "$check_rule_file" | cut -d'"' -f2)
-                                        if [ -n "$temp_weight" ] && [[ "$temp_weight" != *","* ]]; then
-                                            total_weight=$((total_weight + temp_weight))
-                                        fi
-                                    fi
-                                fi
-                            done
-
-                            # 如果还是没有权重，使用当前权重
-                            if [ $total_weight -eq 0 ]; then
-                                total_weight=$current_weight
-                            fi
-                        fi
-
-                        # 计算百分比
-                        local percentage
-                        if [ "$total_weight" -gt 0 ]; then
-                            if command -v bc >/dev/null 2>&1; then
-                                percentage=$(echo "scale=1; $current_weight * 100 / $total_weight" | bc 2>/dev/null || echo "100.0")
-                            else
-                                percentage=$(awk "BEGIN {printf \"%.1f\", $current_weight * 100 / $total_weight}")
-                            fi
-                        else
-                            percentage="100.0"
-                        fi
-
-                        # 构建故障转移状态信息
-                        local failover_info=""
-                        if [ "$balance_mode" != "off" ]; then
-                            local failover_enabled="${FAILOVER_ENABLED:-false}"
-                            if [ "$failover_enabled" = "true" ]; then
-                                # 读取真实健康状态
-                                local health_status_file="/etc/realm/health/health_status.conf"
-                                local overall_status="healthy"
-
-                                if [ -f "$health_status_file" ]; then
-                                    # 检查所有目标的健康状态
-                                    if [[ "$REMOTE_HOST" == *","* ]]; then
-                                        IFS=',' read -ra host_list <<< "$REMOTE_HOST"
-                                        local failed_count=0
-                                        local total_count=${#host_list[@]}
-
-                                        for host in "${host_list[@]}"; do
-                                            host=$(echo "$host" | xargs)
-                                            local health_key="${RULE_ID}|${host}"
-                                            local node_status=$(grep "^${health_key}|" "$health_status_file" 2>/dev/null | cut -d'|' -f3)
-                                            if [ "$node_status" = "failed" ]; then
-                                                failed_count=$((failed_count + 1))
-                                            fi
-                                        done
-
-                                        if [ "$failed_count" -eq "$total_count" ]; then
-                                            overall_status="failed"
-                                        elif [ "$failed_count" -gt 0 ]; then
-                                            overall_status="partial"
-                                        fi
-                                    else
-                                        # 单个目标
-                                        local health_key="${RULE_ID}|${REMOTE_HOST}"
-                                        local node_status=$(grep "^${health_key}|" "$health_status_file" 2>/dev/null | cut -d'|' -f3)
-                                        if [ "$node_status" = "failed" ]; then
-                                            overall_status="failed"
-                                        fi
-                                    fi
-                                fi
-
-                                # 根据状态显示不同颜色
-                                case "$overall_status" in
-                                    "healthy")
-                                        failover_info=" ${GREEN}[健康]${NC}"
-                                        ;;
-                                    "partial")
-                                        failover_info=" ${YELLOW}[部分故障]${NC}"
-                                        ;;
-                                    "failed")
-                                        failover_info=" ${RED}[故障]${NC}"
-                                        ;;
-                                esac
-                            fi
-                        fi
-
-                        local weight_info=" ${GREEN}[权重: $current_weight]${NC} ${BLUE}($percentage%)${NC}"
-                        local through_display="${THROUGH_IP:-::}"
-                        echo -e "  ID ${BLUE}$RULE_ID${NC}: ${GREEN}$RULE_NAME${NC} ($LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT) [${status_color}$status_text${NC}]$balance_info$weight_info$failover_info"
                     else
-                        # 非负载均衡组，不显示权重信息
-                        local through_display="${THROUGH_IP:-::}"
-                        echo -e "  ID ${BLUE}$RULE_ID${NC}: ${GREEN}$RULE_NAME${NC} ($LISTEN_PORT → $through_display → $display_target:$REMOTE_PORT) [${status_color}$status_text${NC}]$balance_info"
-                    fi
-                else
-                    # 非负载均衡组的故障转移信息处理
-                        # 构建故障转移状态信息（复用上面的逻辑）
-                        local failover_info=""
-                        if [ "$balance_mode" != "off" ]; then
-                            local failover_enabled="${FAILOVER_ENABLED:-false}"
-                            if [ "$failover_enabled" = "true" ]; then
-                                # 读取真实健康状态
-                                local health_status_file="/etc/realm/health/health_status.conf"
-                                local overall_status="healthy"
-
-                                if [ -f "$health_status_file" ]; then
-                                    # 检查所有目标的健康状态
-                                    if [[ "$REMOTE_HOST" == *","* ]]; then
-                                        IFS=',' read -ra host_list <<< "$REMOTE_HOST"
-                                        local failed_count=0
-                                        local total_count=${#host_list[@]}
-
-                                        for host in "${host_list[@]}"; do
-                                            host=$(echo "$host" | xargs)
-                                            local health_key="${RULE_ID}|${host}"
-                                            local node_status=$(grep "^${health_key}|" "$health_status_file" 2>/dev/null | cut -d'|' -f3)
-                                            if [ "$node_status" = "failed" ]; then
-                                                failed_count=$((failed_count + 1))
-                                            fi
-                                        done
-
-                                        if [ "$failed_count" -eq "$total_count" ]; then
-                                            overall_status="failed"
-                                        elif [ "$failed_count" -gt 0 ]; then
-                                            overall_status="partial"
-                                        fi
-                                    else
-                                        # 单个目标
-                                        local health_key="${RULE_ID}|${REMOTE_HOST}"
-                                        local node_status=$(grep "^${health_key}|" "$health_status_file" 2>/dev/null | cut -d'|' -f3)
-                                        if [ "$node_status" = "failed" ]; then
-                                            overall_status="failed"
-                                        fi
-                                    fi
-                                fi
-
-                                # 根据状态显示不同颜色
-                                case "$overall_status" in
-                                    "healthy")
-                                        failover_info=" ${GREEN}[健康]${NC}"
-                                        ;;
-                                    "partial")
-                                        failover_info=" ${YELLOW}[部分故障]${NC}"
-                                        ;;
-                                    "failed")
-                                        failover_info=" ${RED}[故障]${NC}"
-                                        ;;
-                                esac
+                        local target="$REMOTE_HOST:$REMOTE_PORT"
+                        if [[ "${port_groups[$port_key]}" != *"$target"* ]]; then
+                            if [ -z "${port_groups[$port_key]}" ]; then
+                                port_groups[$port_key]="$target"
+                            else
+                                port_groups[$port_key]="${port_groups[$port_key]},$target"
                             fi
                         fi
-
                     fi
                 fi
             fi
         done
 
-        if [ "$has_relay_rules" = false ]; then
-            echo -e "${YELLOW}暂无中转服务器规则${NC}"
-            echo -e "${BLUE}提示: 只有中转服务器支持负载均衡功能${NC}"
+        # 只显示有多个服务器的端口组
+        local has_balance_groups=false
+        echo -e "${GREEN}中转服务器:${NC}"
+
+        for port_key in $(printf '%s\n' "${!port_groups[@]}" | sort -n); do
+            IFS=',' read -ra targets <<< "${port_groups[$port_key]}"
+            local target_count=${#targets[@]}
+
+            # 只显示有至少两台服务器的端口组
+            if [ $target_count -gt 1 ]; then
+                has_balance_groups=true
+
+                local balance_mode="${port_balance_modes[$port_key]}"
+                local balance_info=$(get_balance_info_display "${port_groups[$port_key]}" "$balance_mode")
+
+                # 显示端口组标题
+                echo -e "  ${BLUE}端口 $port_key${NC}: ${GREEN}${port_configs[$port_key]}${NC} [$balance_info] - $target_count个服务器"
+
+                # 显示每个服务器及其权重
+                for ((i=0; i<target_count; i++)); do
+                    local target="${targets[i]}"
+
+                    # 获取权重信息
+                    local current_weight=1
+                    local weights_str="${port_weights[$port_key]}"
+
+                    if [ -n "$weights_str" ] && [[ "$weights_str" == *","* ]]; then
+                        IFS=',' read -ra weight_array <<< "$weights_str"
+                        current_weight="${weight_array[i]:-1}"
+                    elif [ -n "$weights_str" ] && [[ "$weights_str" != *","* ]]; then
+                        current_weight="$weights_str"
+                    fi
+
+                    # 计算权重百分比
+                    local total_weight=0
+                    if [ -n "$weights_str" ] && [[ "$weights_str" == *","* ]]; then
+                        IFS=',' read -ra weight_array <<< "$weights_str"
+                        for w in "${weight_array[@]}"; do
+                            total_weight=$((total_weight + w))
+                        done
+                    else
+                        total_weight=$((target_count * current_weight))
+                    fi
+
+                    local percentage
+                    if [ "$total_weight" -gt 0 ]; then
+                        if command -v bc >/dev/null 2>&1; then
+                            percentage=$(echo "scale=1; $current_weight * 100 / $total_weight" | bc 2>/dev/null || echo "100.0")
+                        else
+                            percentage=$(awk "BEGIN {printf \"%.1f\", $current_weight * 100 / $total_weight}")
+                        fi
+                    else
+                        percentage="100.0"
+                    fi
+
+                    # 构建故障转移状态信息
+                    local failover_info=""
+                    if [ "$balance_mode" != "off" ] && [ "${port_failover_status[$port_key]}" = "true" ]; then
+                        local health_status_file="/etc/realm/health/health_status.conf"
+                        local node_status="healthy"
+
+                        if [ -f "$health_status_file" ]; then
+                            local host_only=$(echo "$target" | cut -d':' -f1)
+                            local health_key="*|${host_only}"
+                            local found_status=$(grep "^.*|${host_only}|" "$health_status_file" 2>/dev/null | cut -d'|' -f3 | head -1)
+                            if [ "$found_status" = "failed" ]; then
+                                node_status="failed"
+                            fi
+                        fi
+
+                        case "$node_status" in
+                            "healthy") failover_info=" ${GREEN}[健康]${NC}" ;;
+                            "failed") failover_info=" ${RED}[故障]${NC}" ;;
+                        esac
+                    fi
+
+                    # 显示服务器信息（只在负载均衡模式下显示权重）
+                    if [ "$balance_mode" != "off" ]; then
+                        echo -e "    ${BLUE}$((i+1)).${NC} $target ${GREEN}[权重: $current_weight]${NC} ${BLUE}($percentage%)${NC}$failover_info"
+                    else
+                        echo -e "    ${BLUE}$((i+1)).${NC} $target$failover_info"
+                    fi
+                done
+                echo ""
+            fi
+        done
+
+        if [ "$has_balance_groups" = false ]; then
+            echo -e "${YELLOW}暂无符合条件的负载均衡组${NC}"
+            echo -e "${BLUE}提示: 只显示单端口有至少两台服务器的中转规则${NC}"
             echo ""
             read -p "按回车键返回..."
             return
