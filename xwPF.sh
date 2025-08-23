@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.7.5"
+SCRIPT_VERSION="v1.8.0"
 
 # 临时配置变量（仅在配置过程中使用）
 NAT_LISTEN_PORT=""
@@ -23,7 +23,7 @@ RULE_ID=""
 RULE_NAME=""
 
 # 依赖工具列表
-REQUIRED_TOOLS=("curl" "wget" "tar" "systemctl" "grep" "cut" "bc")
+REQUIRED_TOOLS=("curl" "wget" "tar" "grep" "cut" "bc")
 
 # 通用的字段初始化函数
 init_rule_field() {
@@ -103,7 +103,7 @@ generate_base_config_template() {
     cat <<EOF
 {
     "log": {
-        "level": "warn",
+        "level": "info",
         "output": "${LOG_PATH}"
     },
     "dns": {
@@ -131,7 +131,7 @@ generate_base_config_template() {
 EOF
 }
 
-# 生成完整的realm配置文件（使用统一模板）
+# 生成完整的realm配置文件
 generate_complete_config() {
     local endpoints="$1"
     local config_path="${2:-$CONFIG_PATH}"
@@ -229,7 +229,6 @@ manage_dependencies() {
                     "curl") apt-get install -y curl >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} curl 安装成功" ;;
                     "wget") apt-get install -y wget >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} wget 安装成功" ;;
                     "tar") apt-get install -y tar >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} tar 安装成功" ;;
-                    "systemctl") apt-get install -y systemd >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} systemd 安装成功" ;;
                     "bc") apt-get install -y bc >/dev/null 2>&1 && echo -e "${GREEN}✓${NC} bc 安装成功" ;;
                     "nc")
                         # 确保安装正确的netcat版本
@@ -343,7 +342,7 @@ check_port_usage() {
     # 查询端口占用情况
     local port_output=$($port_check_cmd 2>/dev/null | grep ":${port} ")
     if [ -n "$port_output" ]; then
-        # 直接检查输出中是否包含realm进程（更简单可靠）
+        # 直接检查输出中是否包含realm进程
         if echo "$port_output" | grep -q "realm"; then
             # realm自身占用，返回特殊状态码
             echo -e "${GREEN}✓ 端口 $port 已被realm服务占用，支持单端口中转多落地配置${NC}"
@@ -365,50 +364,6 @@ check_port_usage() {
     fi
     # 端口可用时静默通过，不显示提示
     return 0
-}
-
-# 检查防火墙
-check_firewall() {
-    local port="$1"
-    local service_name="$2"
-
-    if [ -z "$port" ]; then
-        return 0
-    fi
-
-    echo -e "${YELLOW}检查防火墙状态...${NC}"
-
-    # 检查ufw
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-        echo -e "${BLUE}检测到 UFW 防火墙已启用${NC}"
-        read -p "是否自动放行端口 $port？(y/n): " allow_port
-        if [[ "$allow_port" =~ ^[Yy]$ ]]; then
-            ufw allow "$port" >/dev/null 2>&1
-            echo -e "${GREEN}✓ UFW 已放行端口 $port${NC}"
-        fi
-    # 检查firewalld
-    elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-        echo -e "${BLUE}检测到 Firewalld 防火墙已启用${NC}"
-        read -p "是否自动放行端口 $port？(y/n): " allow_port
-        if [[ "$allow_port" =~ ^[Yy]$ ]]; then
-            firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1
-            firewall-cmd --reload >/dev/null 2>&1
-            echo -e "${GREEN}✓ Firewalld 已放行端口 $port${NC}"
-        fi
-    # 检查iptables
-    elif command -v iptables >/dev/null 2>&1; then
-        if iptables -L INPUT 2>/dev/null | grep -q "DROP\|REJECT"; then
-            echo -e "${BLUE}检测到 iptables 防火墙规则${NC}"
-            read -p "是否自动放行端口 $port？(y/n): " allow_port
-            if [[ "$allow_port" =~ ^[Yy]$ ]]; then
-                iptables -I INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null
-                echo -e "${GREEN}✓ iptables 已放行端口 $port${NC}"
-                echo -e "${YELLOW}注意: 请手动保存 iptables 规则以确保重启后生效${NC}"
-            fi
-        fi
-    else
-        echo -e "${GREEN}✓ 未检测到活跃的防火墙${NC}"
-    fi
 }
 
 # 测试IP或域名的连通性
@@ -492,7 +447,7 @@ validate_single_address() {
         return 0
     fi
 
-    # 域名格式检查（简化）
+    # 域名格式检查
     if [[ "$addr" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || [[ "$addr" == "localhost" ]]; then
         return 0
     fi
@@ -673,6 +628,58 @@ init_rules_dir() {
         touch "${RULES_DIR}/.initialized"
         echo -e "${GREEN}✓ 规则目录已初始化: $RULES_DIR${NC}"
     fi
+}
+
+# 规则ID验证函数
+validate_rule_ids() {
+    local rule_ids="$1"
+    local valid_ids=()
+    local invalid_ids=()
+
+    # 解析逗号分隔的ID
+    local ids_array
+    IFS=',' read -ra ids_array <<< "$rule_ids"
+
+    # 验证所有ID的有效性
+    for id in "${ids_array[@]}"; do
+        # 去除空格
+        id=$(echo "$id" | xargs)
+        if [[ "$id" =~ ^[0-9]+$ ]]; then
+            local rule_file="${RULES_DIR}/rule-${id}.conf"
+            if [ -f "$rule_file" ]; then
+                valid_ids+=("$id")
+            else
+                invalid_ids+=("$id")
+            fi
+        else
+            invalid_ids+=("$id")
+        fi
+    done
+
+    # 输出结果（格式：valid_count|invalid_count|valid_ids|invalid_ids）
+    echo "${#valid_ids[@]}|${#invalid_ids[@]}|${valid_ids[*]}|${invalid_ids[*]}"
+}
+
+# 规则ID解析函数
+parse_rule_ids() {
+    local input="$1"
+    # 去除空格并返回清理后的ID列表
+    echo "$input" | tr -d ' '
+}
+
+# 规则计数函数
+get_active_rules_count() {
+    local count=0
+    if [ -d "$RULES_DIR" ]; then
+        for rule_file in "${RULES_DIR}"/rule-*.conf; do
+            if [ -f "$rule_file" ]; then
+                if read_rule_file "$rule_file"; then
+                    count=$((count + 1))
+                fi
+            fi
+        done
+    fi
+    echo "$count"
 }
 
 # 生成新的规则ID
@@ -1017,19 +1024,9 @@ get_rule_id_by_index() {
     return 1
 }
 
-# 获取规则总数
+# 获取规则总数（保持向后兼容）
 get_rules_count() {
-    local count=0
-    if [ -d "$RULES_DIR" ]; then
-        for rule_file in "${RULES_DIR}"/rule-*.conf; do
-            if [ -f "$rule_file" ]; then
-                if read_rule_file "$rule_file"; then
-                    count=$((count + 1))
-                fi
-            fi
-        done
-    fi
-    echo "$count"
+    get_active_rules_count
 }
 
 # 列出所有规则（详细信息，用于查看）
@@ -1292,45 +1289,31 @@ delete_rule() {
 # 批量删除规则
 batch_delete_rules() {
     local rule_ids="$1"
-    local ids_array
-    local valid_ids=()
-    local invalid_ids=()
 
-    # 解析逗号分隔的ID
-    IFS=',' read -ra ids_array <<< "$rule_ids"
-
-    # 验证所有ID的有效性并收集规则信息
-    for id in "${ids_array[@]}"; do
-        # 去除空格
-        id=$(echo "$id" | tr -d ' ')
-        if [[ "$id" =~ ^[0-9]+$ ]]; then
-            local rule_file="${RULES_DIR}/rule-${id}.conf"
-            if [ -f "$rule_file" ]; then
-                valid_ids+=("$id")
-            else
-                invalid_ids+=("$id")
-            fi
-        else
-            invalid_ids+=("$id")
-        fi
-    done
+    # 使用验证函数
+    local validation_result=$(validate_rule_ids "$rule_ids")
+    IFS='|' read -r valid_count invalid_count valid_ids invalid_ids <<< "$validation_result"
 
     # 检查是否有无效ID
-    if [ ${#invalid_ids[@]} -gt 0 ]; then
-        echo -e "${RED}错误: 以下规则ID无效或不存在: ${invalid_ids[*]}${NC}"
+    if [ "$invalid_count" -gt 0 ]; then
+        echo -e "${RED}错误: 以下规则ID无效或不存在: $invalid_ids${NC}"
         return 1
     fi
 
     # 检查是否有有效ID
-    if [ ${#valid_ids[@]} -eq 0 ]; then
+    if [ "$valid_count" -eq 0 ]; then
         echo -e "${RED}错误: 没有找到有效的规则ID${NC}"
         return 1
     fi
 
+    # 转换为数组
+    local valid_ids_array
+    IFS=' ' read -ra valid_ids_array <<< "$valid_ids"
+
     # 显示所有要删除的规则信息
     echo -e "${YELLOW}即将删除以下规则:${NC}"
     echo ""
-    for id in "${valid_ids[@]}"; do
+    for id in "${valid_ids_array[@]}"; do
         local rule_file="${RULES_DIR}/rule-${id}.conf"
         if read_rule_file "$rule_file"; then
             echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC} | ${BLUE}规则名称: ${GREEN}$RULE_NAME${NC} | ${BLUE}监听端口: ${GREEN}$LISTEN_PORT${NC}"
@@ -1339,11 +1322,11 @@ batch_delete_rules() {
     echo ""
 
     # 批量确认删除
-    read -p "确认删除以上 ${#valid_ids[@]} 个规则？(y/n): " confirm
+    read -p "确认删除以上 $valid_count 个规则？(y/n): " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         local deleted_count=0
         # 循环调用delete_rule，跳过单个确认
-        for id in "${valid_ids[@]}"; do
+        for id in "${valid_ids_array[@]}"; do
             if delete_rule "$id" "true"; then
                 deleted_count=$((deleted_count + 1))
             fi
@@ -1417,10 +1400,7 @@ export_config_package() {
     echo ""
 
     # 检查是否有可导出的配置
-    local rules_count=0
-    if [ -d "$RULES_DIR" ]; then
-        rules_count=$(find "$RULES_DIR" -name "rule-*.conf" -type f 2>/dev/null | wc -l)
-    fi
+    local rules_count=$(get_active_rules_count)
 
     local has_manager_conf=false
     [ -f "$MANAGER_CONF" ] && has_manager_conf=true
@@ -1542,16 +1522,16 @@ export_config_with_view() {
     echo ""
     echo "是否一键导出当前全部文件架构？"
     echo -e "${GREEN}1.${NC}  一键导出为压缩包 "
-    echo -e "${GREEN}2.${NC} 返回菜单"
+    echo -e "${GREEN}0.${NC} 返回菜单"
     echo ""
-    read -p "请输入选择 [1-2]: " export_choice
+    read -p "请输入选择 [0-1]: " export_choice
     echo ""
 
     case $export_choice in
         1)
             export_config_package
             ;;
-        2)
+        0)
             ;;
         *)
             echo -e "${RED}无效选择${NC}"
@@ -1635,10 +1615,7 @@ import_config_package() {
     fi
 
     # 统计当前配置
-    local current_rules=0
-    if [ -d "$RULES_DIR" ]; then
-        current_rules=$(find "$RULES_DIR" -name "rule-*.conf" -type f 2>/dev/null | wc -l)
-    fi
+    local current_rules=$(get_active_rules_count)
 
     echo -e "${YELLOW}当前规则数量: $current_rules${NC}"
     echo -e "${YELLOW}即将导入规则: $RULES_COUNT${NC}"
@@ -1893,10 +1870,10 @@ rules_management_menu() {
         echo -e "${BLUE}5.${NC} 负载均衡管理"
         echo -e "${YELLOW}6.${NC} 开启/关闭 MPTCP"
         echo -e "${CYAN}7.${NC} 开启/关闭 Proxy Protocol"
-        echo -e "${GREEN}8.${NC} 返回主菜单"
+        echo -e "${GREEN}0.${NC} 返回主菜单"
         echo ""
 
-        read -p "请输入选择 [1-8]: " choice
+        read -p "请输入选择 [0-7]: " choice
         echo ""
 
         case $choice in
@@ -1909,9 +1886,9 @@ rules_management_menu() {
                     echo "请选择操作:"
                     echo -e "${GREEN}1.${NC} 导出配置包(包含查看配置)"
                     echo -e "${GREEN}2.${NC} 导入配置包"
-                    echo -e "${GREEN}3.${NC} 返回上级菜单"
+                    echo -e "${GREEN}0.${NC} 返回上级菜单"
                     echo ""
-                    read -p "请输入选择 [1-3]: " sub_choice
+                    read -p "请输入选择 [0-2]: " sub_choice
                     echo ""
 
                     case $sub_choice in
@@ -1921,7 +1898,7 @@ rules_management_menu() {
                         2)
                             import_config_package
                             ;;
-                        3)
+                        0)
                             break
                             ;;
                         *)
@@ -2002,11 +1979,11 @@ rules_management_menu() {
                 # Proxy管理
                 proxy_management_menu
                 ;;
-            8)
+            0)
                 break
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-8${NC}"
+                echo -e "${RED}无效选择，请输入 0-7${NC}"
                 read -p "按回车键继续..."
                 ;;
         esac
@@ -2524,45 +2501,31 @@ mptcp_management_menu() {
 batch_set_mptcp_mode() {
     local rule_ids="$1"
     local mode_choice="$2"
-    local ids_array
-    local valid_ids=()
-    local invalid_ids=()
 
-    # 解析逗号分隔的ID
-    IFS=',' read -ra ids_array <<< "$rule_ids"
-
-    # 验证所有ID的有效性
-    for id in "${ids_array[@]}"; do
-        # 去除空格
-        id=$(echo "$id" | tr -d ' ')
-        if [[ "$id" =~ ^[0-9]+$ ]]; then
-            local rule_file="${RULES_DIR}/rule-${id}.conf"
-            if [ -f "$rule_file" ]; then
-                valid_ids+=("$id")
-            else
-                invalid_ids+=("$id")
-            fi
-        else
-            invalid_ids+=("$id")
-        fi
-    done
+    # 使用验证函数
+    local validation_result=$(validate_rule_ids "$rule_ids")
+    IFS='|' read -r valid_count invalid_count valid_ids invalid_ids <<< "$validation_result"
 
     # 检查是否有无效ID
-    if [ ${#invalid_ids[@]} -gt 0 ]; then
-        echo -e "${RED}错误: 以下规则ID无效或不存在: ${invalid_ids[*]}${NC}"
+    if [ "$invalid_count" -gt 0 ]; then
+        echo -e "${RED}错误: 以下规则ID无效或不存在: $invalid_ids${NC}"
         return 1
     fi
 
     # 检查是否有有效ID
-    if [ ${#valid_ids[@]} -eq 0 ]; then
+    if [ "$valid_count" -eq 0 ]; then
         echo -e "${RED}错误: 没有找到有效的规则ID${NC}"
         return 1
     fi
 
+    # 转换为数组
+    local valid_ids_array
+    IFS=' ' read -ra valid_ids_array <<< "$valid_ids"
+
     # 显示所有要设置的规则信息
     echo -e "${YELLOW}即将为以下规则设置MPTCP模式:${NC}"
     echo ""
-    for id in "${valid_ids[@]}"; do
+    for id in "${valid_ids_array[@]}"; do
         local rule_file="${RULES_DIR}/rule-${id}.conf"
         if read_rule_file "$rule_file"; then
             echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC} | ${BLUE}规则名称: ${GREEN}$RULE_NAME${NC}"
@@ -2571,11 +2534,11 @@ batch_set_mptcp_mode() {
     echo ""
 
     # 批量确认设置
-    read -p "确认为以上 ${#valid_ids[@]} 个规则设置MPTCP模式？(y/n): " confirm
+    read -p "确认为以上 $valid_count 个规则设置MPTCP模式？(y/n): " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         local success_count=0
         # 循环设置每个规则
-        for id in "${valid_ids[@]}"; do
+        for id in "${valid_ids_array[@]}"; do
             if set_mptcp_mode "$id" "$mode_choice" "batch"; then
                 success_count=$((success_count + 1))
             fi
@@ -3188,45 +3151,31 @@ batch_set_proxy_mode() {
     local rule_ids="$1"
     local version_choice="$2"
     local direction_choice="$3"
-    local ids_array
-    local valid_ids=()
-    local invalid_ids=()
 
-    # 解析逗号分隔的ID
-    IFS=',' read -ra ids_array <<< "$rule_ids"
-
-    # 验证所有ID的有效性
-    for id in "${ids_array[@]}"; do
-        # 去除空格
-        id=$(echo "$id" | tr -d ' ')
-        if [[ "$id" =~ ^[0-9]+$ ]]; then
-            local rule_file="${RULES_DIR}/rule-${id}.conf"
-            if [ -f "$rule_file" ]; then
-                valid_ids+=("$id")
-            else
-                invalid_ids+=("$id")
-            fi
-        else
-            invalid_ids+=("$id")
-        fi
-    done
+    # 使用验证函数
+    local validation_result=$(validate_rule_ids "$rule_ids")
+    IFS='|' read -r valid_count invalid_count valid_ids invalid_ids <<< "$validation_result"
 
     # 检查是否有无效ID
-    if [ ${#invalid_ids[@]} -gt 0 ]; then
-        echo -e "${RED}错误: 以下规则ID无效或不存在: ${invalid_ids[*]}${NC}"
+    if [ "$invalid_count" -gt 0 ]; then
+        echo -e "${RED}错误: 以下规则ID无效或不存在: $invalid_ids${NC}"
         return 1
     fi
 
     # 检查是否有有效ID
-    if [ ${#valid_ids[@]} -eq 0 ]; then
+    if [ "$valid_count" -eq 0 ]; then
         echo -e "${RED}错误: 没有找到有效的规则ID${NC}"
         return 1
     fi
 
+    # 转换为数组
+    local valid_ids_array
+    IFS=' ' read -ra valid_ids_array <<< "$valid_ids"
+
     # 显示所有要设置的规则信息
     echo -e "${YELLOW}即将为以下规则设置Proxy模式:${NC}"
     echo ""
-    for id in "${valid_ids[@]}"; do
+    for id in "${valid_ids_array[@]}"; do
         local rule_file="${RULES_DIR}/rule-${id}.conf"
         if read_rule_file "$rule_file"; then
             echo -e "${BLUE}规则ID: ${GREEN}$RULE_ID${NC} | ${BLUE}规则名称: ${GREEN}$RULE_NAME${NC}"
@@ -3235,11 +3184,11 @@ batch_set_proxy_mode() {
     echo ""
 
     # 批量确认设置
-    read -p "确认为以上 ${#valid_ids[@]} 个规则设置Proxy模式？(y/n): " confirm
+    read -p "确认为以上 $valid_count 个规则设置Proxy模式？(y/n): " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         local success_count=0
         # 循环设置每个规则
-        for id in "${valid_ids[@]}"; do
+        for id in "${valid_ids_array[@]}"; do
             if set_proxy_mode "$id" "$version_choice" "$direction_choice" "batch"; then
                 success_count=$((success_count + 1))
             fi
@@ -3558,10 +3507,10 @@ load_balance_management_menu() {
         echo -e "${GREEN}1.${NC} 切换负载均衡模式"
         echo -e "${BLUE}2.${NC} 权重配置管理"
         echo -e "${YELLOW}3.${NC} 开启/关闭故障转移"
-        echo -e "${RED}4.${NC} 返回上级菜单"
+        echo -e "${RED}0.${NC} 返回上级菜单"
         echo ""
 
-        read -p "请输入选择 [1-4]: " choice
+        read -p "请输入选择 [0-3]: " choice
         echo ""
 
         case $choice in
@@ -3577,12 +3526,12 @@ load_balance_management_menu() {
                 # 开启/关闭故障转移
                 toggle_failover_mode
                 ;;
-            4)
+            0)
                 # 返回上级菜单
                 break
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-4${NC}"
+                echo -e "${RED}无效选择，请输入 0-3${NC}"
                 read -p "按回车键继续..."
                 ;;
         esac
@@ -3647,10 +3596,8 @@ switch_balance_mode() {
 
         # 显示端口组列表（只显示有多个目标服务器的端口组）
         local has_balance_rules=false
-        declare -a rule_letters
         declare -a rule_ports
         declare -a rule_names
-        declare -A letter_to_port
 
         for port_key in "${!port_groups[@]}"; do
             # 计算目标服务器总数
@@ -3664,14 +3611,10 @@ switch_balance_mode() {
                     has_balance_rules=true
                 fi
 
-                # 生成字母A、B、C等
-                local letter_index=${#rule_letters[@]}
-                local letters="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                local letter=${letters:$letter_index:1}
-                rule_letters+=("$letter")
+                # 使用数字ID
+                local rule_number=$((${#rule_ports[@]} + 1))
                 rule_ports+=("$port_key")
                 rule_names+=("${port_configs[$port_key]}")
-                letter_to_port[$letter]="$port_key"
 
                 local balance_mode="${port_balance_modes[$port_key]}"
                 local balance_display=""
@@ -3687,7 +3630,7 @@ switch_balance_mode() {
                         ;;
                 esac
 
-                echo -e "${GREEN}$letter.${NC} ${port_configs[$port_key]} (端口: $port_key) $balance_display - $target_count个目标服务器"
+                echo -e "${GREEN}$rule_number.${NC} ${port_configs[$port_key]} (端口: $port_key) $balance_display - $target_count个目标服务器"
             fi
         done
 
@@ -3709,21 +3652,22 @@ switch_balance_mode() {
         echo ""
         echo -e "${WHITE}注意: 负载均衡模式将应用到选定端口组的所有相关规则${NC}"
         echo ""
-        read -p "请输入要切换负载均衡模式的规则字母: " choice
+        read -p "请输入规则编号 [1-${#rule_ports[@]}] (或按回车返回): " choice
 
         if [ -z "$choice" ]; then
             return
         fi
 
-        choice=$(echo "$choice" | tr '[:lower:]' '[:upper:]')
-
-        if [ -z "${letter_to_port[$choice]}" ]; then
-            echo -e "${RED}无效的规则字母${NC}"
+        # 验证数字输入
+        if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#rule_ports[@]} ]; then
+            echo -e "${RED}无效的规则编号${NC}"
             read -p "按回车键继续..."
             continue
         fi
 
-        local selected_port="${letter_to_port[$choice]}"
+        # 计算数组索引（从0开始）
+        local selected_index=$((choice - 1))
+        local selected_port="${rule_ports[$selected_index]}"
         local current_balance_mode="${port_balance_modes[$selected_port]}"
 
         echo ""
@@ -4127,9 +4071,6 @@ configure_nat_server() {
         fi
     fi
 
-    # 检查防火墙
-    check_firewall "$NAT_LISTEN_PORT" "中转服务器监听"
-
     # 如果端口被realm占用，跳过协议和传输配置
     if [ $port_status -eq 1 ]; then
         # 跳过协议和传输配置，直接进入规则创建
@@ -4333,9 +4274,6 @@ configure_exit_server() {
 
     # 诊断端口占用
     check_port_usage "$EXIT_LISTEN_PORT" "出口服务器监听"
-
-    # 检查防火墙
-    check_firewall "$EXIT_LISTEN_PORT" "出口服务器监听"
 
     echo ""
 
@@ -6267,95 +6205,7 @@ service_status() {
     systemctl status realm --no-pager -l
 }
 
-
-# 清理防火墙规则（卸载时调用）
-cleanup_firewall_rules() {
-    echo -e "${BLUE}  正在检查防火墙规则...${NC}"
-
-    # 收集realm配置的端口
-    local ports_to_clean=()
-
-
-
-    # 从规则文件读取端口
-    if [ -d "$RULES_DIR" ]; then
-        for rule_file in "${RULES_DIR}"/rule-*.conf; do
-            if [ -f "$rule_file" ]; then
-                local listen_port=$(grep "^LISTEN_PORT=" "$rule_file" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
-                [ -n "$listen_port" ] && [[ "$listen_port" =~ ^[0-9]+$ ]] && ports_to_clean+=("$listen_port")
-            fi
-        done
-    fi
-
-    # 去重端口列表
-    local unique_ports=($(printf '%s\n' "${ports_to_clean[@]}" | sort -u))
-
-    if [ ${#unique_ports[@]} -eq 0 ]; then
-        echo -e "${GRAY}    无realm端口需要清理${NC}"
-        return 0
-    fi
-
-    local total_cleaned=0
-
-    # 安全清理UFW规则 - 只清理明确由realm添加的规则
-    if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
-        local ufw_cleaned=0
-        for port in "${unique_ports[@]}"; do
-            # 检查端口是否确实被realm使用（通过检查进程）
-            if ! netstat -tlnp 2>/dev/null | grep ":$port " | grep -q "realm"; then
-                # 只有当端口不再被realm使用时才清理防火墙规则
-                if ufw status numbered 2>/dev/null | grep -q "ALLOW.*$port"; then
-                    # 使用更安全的删除方式
-                    echo "y" | ufw delete allow "$port" >/dev/null 2>&1
-                    if [ $? -eq 0 ]; then
-                        ufw_cleaned=$((ufw_cleaned + 1))
-                    fi
-                fi
-            fi
-        done
-        [ $ufw_cleaned -gt 0 ] && echo -e "${GREEN}✓${NC}   已清理UFW防火墙规则: ${ufw_cleaned}个端口"
-        total_cleaned=$((total_cleaned + ufw_cleaned))
-    fi
-
-    # 安全清理Firewalld规则
-    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-        local firewalld_cleaned=0
-        for port in "${unique_ports[@]}"; do
-            # 检查端口是否确实被realm使用
-            if ! netstat -tlnp 2>/dev/null | grep ":$port " | grep -q "realm"; then
-                # 检查并清理TCP规则
-                if firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/tcp"; then
-                    firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1
-                    [ $? -eq 0 ] && firewalld_cleaned=$((firewalld_cleaned + 1))
-                fi
-                # 检查并清理UDP规则
-                if firewall-cmd --list-ports 2>/dev/null | grep -q "${port}/udp"; then
-                    firewall-cmd --permanent --remove-port="${port}/udp" >/dev/null 2>&1
-                    [ $? -eq 0 ] && firewalld_cleaned=$((firewalld_cleaned + 1))
-                fi
-            fi
-        done
-        if [ $firewalld_cleaned -gt 0 ]; then
-            firewall-cmd --reload >/dev/null 2>&1
-            echo -e "${GREEN}✓${NC}   已清理Firewalld防火墙规则: ${firewalld_cleaned}个端口"
-            total_cleaned=$((total_cleaned + firewalld_cleaned))
-        fi
-    fi
-
-    # 对于iptables，由于规则复杂且风险高，不进行自动清理
-    # 只在确实有端口且其他防火墙有清理时才显示信息
-    if command -v iptables >/dev/null 2>&1 && [ $total_cleaned -gt 0 ]; then
-        echo -e "${YELLOW}!${NC}   iptables规则需要手动检查清理"
-    fi
-
-    if [ $total_cleaned -gt 0 ]; then
-        echo -e "${GREEN}✓${NC} 防火墙规则清理完成"
-    else
-        echo -e "${GRAY}    无需清理防火墙规则${NC}"
-    fi
-}
-
-# 高效简洁的卸载函数
+# 卸载函数
 uninstall_realm() {
     echo -e "${RED}⚠️  警告: 即将分阶段卸载 Realm 端口转发服务${NC}"
     echo ""
@@ -6398,7 +6248,6 @@ uninstall_realm_stage_one() {
     # 清理系统配置
     [ -f "/etc/sysctl.d/90-enable-MPTCP.conf" ] && rm -f "/etc/sysctl.d/90-enable-MPTCP.conf"
     command -v ip >/dev/null 2>&1 && ip mptcp endpoint flush 2>/dev/null
-    cleanup_firewall_rules
     systemctl daemon-reload
 }
 
@@ -6891,10 +6740,10 @@ show_menu() {
         echo -e "${GREEN}5.${NC} 查看日志"
         echo -e "${BLUE}6.${NC} 中转网络链路测试"
         echo -e "${RED}7.${NC} 卸载服务"
-        echo -e "${YELLOW}8.${NC} 退出"
+        echo -e "${YELLOW}0.${NC} 退出"
         echo ""
 
-        read -p "请输入选择 [1-8]: " choice
+        read -p "请输入选择 [0-7]: " choice
         echo ""
 
         case $choice in
@@ -6931,19 +6780,19 @@ show_menu() {
                 uninstall_realm
                 read -p "按回车键继续..."
                 ;;
-            8)
-                echo -e "${BLUE}感谢使用 Realm 端口转发管理脚本！${NC}"
+            0)
+                echo -e "${BLUE}感谢使用xwPF 网络转发管理脚本！${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-8${NC}"
+                echo -e "${RED}无效选择，请输入 0-7${NC}"
                 read -p "按回车键继续..."
                 ;;
         esac
     done
 }
 
-# 内置清理机制（优雅管理临时文件和缓存）
+# 内置清理机制
 cleanup_temp_files() {
     # 清理过期的路径缓存（超过24小时）
     local cache_file="/tmp/realm_path_cache"
@@ -7056,8 +6905,8 @@ toggle_failover_mode() {
 
         # 检查是否有负载均衡规则组（只显示有多个目标的规则组）
         local has_balance_rules=false
-        local letter_index=0
-        declare -A letter_to_port
+        declare -a rule_ports
+        declare -a rule_names
 
         if [ ${#port_groups[@]} -gt 0 ]; then
             echo -e "${BLUE}当前负载均衡规则组:${NC}"
@@ -7074,9 +6923,10 @@ toggle_failover_mode() {
                         has_balance_rules=true
                     fi
 
-                    local letter=$(printf "\\$(printf '%03o' $((65 + letter_index)))")
-                    letter_to_port[$letter]="$port_key"
-                    letter_index=$((letter_index + 1))
+                    # 使用数字ID
+                    local rule_number=$((${#rule_ports[@]} + 1))
+                    rule_ports+=("$port_key")
+                    rule_names+=("${port_configs[$port_key]}")
 
                     # 获取故障转移状态
                     local failover_status="${port_failover_status[$port_key]}"
@@ -7088,7 +6938,7 @@ toggle_failover_mode() {
                         status_color="${GREEN}"
                     fi
 
-                    echo -e "${GREEN}$letter.${NC} ${port_configs[$port_key]} (端口: $port_key) - $target_count个目标服务器 - 故障转移: ${status_color}$status_text${NC}"
+                    echo -e "${GREEN}$rule_number.${NC} ${port_configs[$port_key]} (端口: $port_key) - $target_count个目标服务器 - 故障转移: ${status_color}$status_text${NC}"
                 fi
             done
         fi
@@ -7112,22 +6962,23 @@ toggle_failover_mode() {
         echo ""
         echo -e "${WHITE}注意: 故障转移功能会自动检测节点健康状态并动态调整负载均衡${NC}"
         echo ""
-        read -p "请输入要切换故障转移状态的规则字母: " choice
+        read -p "请输入规则编号 [1-${#rule_ports[@]}] (或按回车返回): " choice
 
         if [ -z "$choice" ]; then
             return
         fi
 
-        choice=$(echo "$choice" | tr '[:lower:]' '[:upper:]')
-
-        if [ -z "${letter_to_port[$choice]}" ]; then
-            echo -e "${RED}无效的规则字母${NC}"
+        # 验证数字输入
+        if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#rule_ports[@]} ]; then
+            echo -e "${RED}无效的规则编号${NC}"
             read -p "按回车键继续..."
             continue
         fi
 
-        local selected_port="${letter_to_port[$choice]}"
-        local rule_name="${port_configs[$selected_port]}"
+        # 计算数组索引（从0开始）
+        local selected_index=$((choice - 1))
+        local selected_port="${rule_ports[$selected_index]}"
+        local rule_name="${rule_names[$selected_index]}"
 
         # 切换故障转移状态
         local current_status="${port_failover_status[$selected_port]}"
@@ -7757,7 +7608,6 @@ weight_management_menu() {
 
         # 检查是否有需要权重配置的端口组（多目标服务器）
         local has_balance_rules=false
-        local rule_letters=()
         local rule_ports=()
         local rule_names=()
 
@@ -7773,16 +7623,13 @@ weight_management_menu() {
                     has_balance_rules=true
                 fi
 
-                # 生成字母A、B、C等
-                local letter_index=${#rule_letters[@]}
-                local letters="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                local letter=${letters:$letter_index:1}
-                rule_letters+=("$letter")
+                # 使用数字ID
+                local rule_number=$((${#rule_ports[@]} + 1))
                 rule_ports+=("$port_key")
                 rule_names+=("${port_configs[$port_key]}")
 
                 local balance_mode="${port_balance_modes[$port_key]}"
-                echo -e "${GREEN}$letter.${NC} ${port_configs[$port_key]} (端口: $port_key) [$balance_mode] - $target_count个目标服务器"
+                echo -e "${GREEN}$rule_number.${NC} ${port_configs[$port_key]} (端口: $port_key) [$balance_mode] - $target_count个目标服务器"
             fi
         done
 
@@ -7804,29 +7651,21 @@ weight_management_menu() {
         echo ""
         echo -e "${GRAY}注意: 只有多个目标服务器的规则组才需要权重配置${NC}"
         echo ""
-        read -p "请输入规则字母 [${rule_letters[0]}-${rule_letters[-1]}] (大小写均可，或按回车返回): " selected_letter
+        read -p "请输入规则编号 [1-${#rule_ports[@]}] (或按回车返回): " selected_number
 
-        if [ -z "$selected_letter" ]; then
+        if [ -z "$selected_number" ]; then
             break
         fi
 
-        # 转换为大写进行比较
-        selected_letter=$(echo "$selected_letter" | tr '[:lower:]' '[:upper:]')
-
-        # 查找选择的规则组
-        local selected_index=-1
-        for i in "${!rule_letters[@]}"; do
-            if [ "${rule_letters[i]}" = "$selected_letter" ]; then
-                selected_index=$i
-                break
-            fi
-        done
-
-        if [ "$selected_index" -eq -1 ]; then
-            echo -e "${RED}无效的规则字母${NC}"
+        # 验证数字输入
+        if ! [[ "$selected_number" =~ ^[0-9]+$ ]] || [ "$selected_number" -lt 1 ] || [ "$selected_number" -gt ${#rule_ports[@]} ]; then
+            echo -e "${RED}无效的规则编号${NC}"
             read -p "按回车键继续..."
             continue
         fi
+
+        # 计算数组索引（从0开始）
+        local selected_index=$((selected_number - 1))
 
         # 配置选中端口组的权重
         local selected_port="${rule_ports[$selected_index]}"

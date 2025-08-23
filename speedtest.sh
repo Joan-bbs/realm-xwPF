@@ -4,7 +4,7 @@
 # 作者: zywe
 # 项目: https://github.com/zywe03/realm-xwPF
 
-# 颜色定义 (与xwPF.sh保持一致)
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -57,7 +57,7 @@ cleanup_on_exit() {
     echo -e "\n${YELLOW}脚本已退出，清理完成${NC}"
 }
 
-# 全局User-Agent
+# User-Agent
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # 统一多源下载函数
@@ -2266,11 +2266,11 @@ show_main_menu() {
     echo -e "${BLUE}2.${NC} 服务端 (开放测试)"
     echo -e "${RED}3.${NC} 卸载脚本"
     echo -e "${YELLOW}4.${NC} 更新脚本"
-    echo -e "${WHITE}5.${NC} 返回中转脚本"
+    echo -e "${WHITE}0.${NC} 返回上级菜单"
     echo ""
 
     while true; do
-        read -p "请输入选择 [1-5]: " choice
+        read -p "请输入选择 [0-4]: " choice
         case $choice in
             1)
                 ROLE="relay"
@@ -2289,12 +2289,12 @@ show_main_menu() {
                 manual_update_script
                 show_main_menu
                 ;;
-            5)
+            0)
                 echo -e "${BLUE}返回中转脚本主菜单...${NC}"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}无效选择，请输入 1-5${NC}"
+                echo -e "${RED}无效选择，请输入 0-4${NC}"
                 ;;
         esac
     done
