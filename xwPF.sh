@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 脚本版本
-SCRIPT_VERSION="v1.8.0"
+SCRIPT_VERSION="v1.9.0"
 
 # 临时配置变量（仅在配置过程中使用）
 NAT_LISTEN_PORT=""
@@ -392,6 +392,215 @@ validate_port() {
     fi
 }
 
+# 验证多端口格式（支持单端口或逗号分隔的多端口）
+validate_ports() {
+    local ports_input="$1"
+
+    # 去除空格
+    ports_input=$(echo "$ports_input" | tr -d ' ')
+
+    # 检查是否为空
+    if [ -z "$ports_input" ]; then
+        return 1
+    fi
+
+    # 分割端口并验证每个端口
+    IFS=',' read -ra PORT_ARRAY <<< "$ports_input"
+    for port in "${PORT_ARRAY[@]}"; do
+        if ! validate_port "$port"; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# 为中转服务器创建多端口规则
+create_nat_rules_for_ports() {
+    local listen_ports="$1"
+    local remote_ports="$2"
+
+    # 去除空格
+    listen_ports=$(echo "$listen_ports" | tr -d ' ')
+    remote_ports=$(echo "$remote_ports" | tr -d ' ')
+
+    # 分割端口
+    IFS=',' read -ra LISTEN_PORT_ARRAY <<< "$listen_ports"
+    IFS=',' read -ra REMOTE_PORT_ARRAY <<< "$remote_ports"
+
+    local listen_count=${#LISTEN_PORT_ARRAY[@]}
+    local remote_count=${#REMOTE_PORT_ARRAY[@]}
+
+    # 如果远程端口只有一个，则所有监听端口都转发到这个远程端口
+    # 如果远程端口有多个，则按顺序一一对应
+    for i in "${!LISTEN_PORT_ARRAY[@]}"; do
+        local listen_port="${LISTEN_PORT_ARRAY[$i]}"
+        local remote_port
+
+        if [ "$remote_count" -eq 1 ]; then
+            remote_port="${REMOTE_PORT_ARRAY[0]}"
+        else
+            if [ "$i" -lt "$remote_count" ]; then
+                remote_port="${REMOTE_PORT_ARRAY[$i]}"
+            else
+                remote_port="${REMOTE_PORT_ARRAY[0]}"  # 如果远程端口不够，使用第一个
+            fi
+        fi
+
+        # 为每个端口创建规则
+        create_single_nat_rule "$listen_port" "$remote_port"
+    done
+
+    # 输出多端口配置总结
+    if [ ${#LISTEN_PORT_ARRAY[@]} -gt 1 ]; then
+        echo -e "${BLUE}多端口配置完成，共创建 ${#LISTEN_PORT_ARRAY[@]} 个中转规则${NC}"
+    fi
+}
+
+# 为落地服务器创建多端口规则
+create_exit_rules_for_ports() {
+    local listen_ports="$1"
+    local forward_ports="$2"
+
+    # 去除空格
+    listen_ports=$(echo "$listen_ports" | tr -d ' ')
+    forward_ports=$(echo "$forward_ports" | tr -d ' ')
+
+    # 分割端口
+    IFS=',' read -ra LISTEN_PORT_ARRAY <<< "$listen_ports"
+    IFS=',' read -ra FORWARD_PORT_ARRAY <<< "$forward_ports"
+
+    local listen_count=${#LISTEN_PORT_ARRAY[@]}
+    local forward_count=${#FORWARD_PORT_ARRAY[@]}
+
+    # 为每个端口创建规则
+    for i in "${!LISTEN_PORT_ARRAY[@]}"; do
+        local listen_port="${LISTEN_PORT_ARRAY[$i]}"
+        local forward_port
+
+        # 如果转发端口只有一个，所有监听端口都转发到这个端口
+        # 如果转发端口有多个，按顺序一一对应
+        if [ "$forward_count" -eq 1 ]; then
+            forward_port="${FORWARD_PORT_ARRAY[0]}"
+        else
+            if [ "$i" -lt "$forward_count" ]; then
+                forward_port="${FORWARD_PORT_ARRAY[$i]}"
+            else
+                forward_port="${FORWARD_PORT_ARRAY[0]}"  # 如果转发端口不够，使用第一个
+            fi
+        fi
+
+        create_single_exit_rule "$listen_port" "$forward_port"
+    done
+
+    # 输出多端口配置总结
+    if [ ${#LISTEN_PORT_ARRAY[@]} -gt 1 ]; then
+        echo -e "${BLUE}多端口配置完成，共创建 ${#LISTEN_PORT_ARRAY[@]} 个落地规则${NC}"
+    fi
+}
+
+# 创建单个中转服务器规则
+create_single_nat_rule() {
+    local listen_port="$1"
+    local remote_port="$2"
+
+    local rule_id=$(generate_rule_id)
+    local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
+
+    # 生成规则名称
+    local rule_name="中转"
+
+    cat > "$rule_file" <<EOF
+RULE_ID=$rule_id
+RULE_NAME="$rule_name"
+RULE_ROLE="1"
+SECURITY_LEVEL="$SECURITY_LEVEL"
+LISTEN_PORT="$listen_port"
+LISTEN_IP="${NAT_LISTEN_IP:-::}"
+THROUGH_IP="$NAT_THROUGH_IP"
+REMOTE_HOST="$REMOTE_IP"
+REMOTE_PORT="$remote_port"
+TLS_SERVER_NAME="$TLS_SERVER_NAME"
+TLS_CERT_PATH="$TLS_CERT_PATH"
+TLS_KEY_PATH="$TLS_KEY_PATH"
+WS_PATH="$WS_PATH"
+RULE_NOTE="$RULE_NOTE"
+ENABLED="true"
+CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
+
+# 负载均衡配置
+BALANCE_MODE="off"
+TARGET_STATES=""
+WEIGHTS=""
+
+# 故障转移配置
+FAILOVER_ENABLED="false"
+HEALTH_CHECK_INTERVAL="4"
+FAILURE_THRESHOLD="2"
+SUCCESS_THRESHOLD="2"
+CONNECTION_TIMEOUT="3"
+
+# MPTCP配置
+MPTCP_MODE="off"
+
+# Proxy配置
+PROXY_MODE="off"
+EOF
+
+    echo -e "${GREEN}✓ 中转配置已创建 (ID: $rule_id) 端口: $listen_port->$REMOTE_IP:$remote_port${NC}"
+}
+
+# 创建单个落地服务器规则
+create_single_exit_rule() {
+    local listen_port="$1"
+    local forward_port="$2"
+
+    local rule_id=$(generate_rule_id)
+    local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
+
+    # 生成规则名称
+    local rule_name="落地"
+
+    # 组合完整的转发目标（包含端口）
+    local forward_target="$FORWARD_TARGET:$forward_port"
+
+    cat > "$rule_file" <<EOF
+RULE_ID=$rule_id
+RULE_NAME="$rule_name"
+RULE_ROLE="2"
+SECURITY_LEVEL="$SECURITY_LEVEL"
+LISTEN_PORT="$listen_port"
+FORWARD_TARGET="$forward_target"
+TLS_SERVER_NAME="$TLS_SERVER_NAME"
+TLS_CERT_PATH="$TLS_CERT_PATH"
+TLS_KEY_PATH="$TLS_KEY_PATH"
+WS_PATH="$WS_PATH"
+RULE_NOTE="$RULE_NOTE"
+ENABLED="true"
+CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
+
+# 负载均衡配置
+BALANCE_MODE="off"
+TARGET_STATES=""
+WEIGHTS=""
+
+# 故障转移配置
+FAILOVER_ENABLED="false"
+HEALTH_CHECK_INTERVAL="4"
+FAILURE_THRESHOLD="2"
+SUCCESS_THRESHOLD="2"
+CONNECTION_TIMEOUT="3"
+
+# MPTCP配置
+MPTCP_MODE="off"
+
+# Proxy配置
+PROXY_MODE="off"
+EOF
+
+    echo -e "${GREEN}✓ 落地配置已创建 (ID: $rule_id) 端口: $listen_port->$forward_target${NC}"
+}
+
 # 验证IP地址格式
 validate_ip() {
     local ip="$1"
@@ -405,7 +614,7 @@ validate_ip() {
         done
         return 0
     fi
-    # IPv6格式检查（简化）
+    # IPv6格式检查
     if [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ip" == *":"* ]]; then
         return 0
     fi
@@ -1143,89 +1352,24 @@ interactive_add_rule() {
     # 创建规则文件
     echo -e "${YELLOW}正在创建转发配置...${NC}"
     init_rules_dir
-    local rule_id=$(generate_rule_id)
-    local rule_file="${RULES_DIR}/rule-${rule_id}.conf"
 
     if [ "$RULE_ROLE" -eq 1 ]; then
-        # 中转服务器规则
-        cat > "$rule_file" <<EOF
-RULE_ID=$rule_id
-RULE_NAME="中转"
-RULE_ROLE="1"
-SECURITY_LEVEL="$SECURITY_LEVEL"
-LISTEN_PORT="$NAT_LISTEN_PORT"
-LISTEN_IP="${NAT_LISTEN_IP:-::}"
-THROUGH_IP="$NAT_THROUGH_IP"
-REMOTE_HOST="$REMOTE_IP"
-REMOTE_PORT="$REMOTE_PORT"
-TLS_SERVER_NAME="$TLS_SERVER_NAME"
-TLS_CERT_PATH="$TLS_CERT_PATH"
-TLS_KEY_PATH="$TLS_KEY_PATH"
-WS_PATH="$WS_PATH"
-RULE_NOTE="$RULE_NOTE"
-ENABLED="true"
-CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
-
-# 负载均衡配置
-BALANCE_MODE="off"
-TARGET_STATES=""
-WEIGHTS=""
-
-# 故障转移配置
-FAILOVER_ENABLED="false"
-HEALTH_CHECK_INTERVAL="4"
-FAILURE_THRESHOLD="2"
-SUCCESS_THRESHOLD="2"
-CONNECTION_TIMEOUT="3"
-
-# MPTCP配置
-MPTCP_MODE="off"
-
-# Proxy配置
-PROXY_MODE="off"
-EOF
-
-        echo -e "${GREEN}✓ 中转配置已创建 (ID: $rule_id)${NC}"
-        echo -e "${BLUE}配置详情: $REMOTE_IP:$REMOTE_PORT${NC}"
-
+        # 中转服务器规则 - 处理多端口
+        create_nat_rules_for_ports "$NAT_LISTEN_PORT" "$REMOTE_PORT"
     elif [ "$RULE_ROLE" -eq 2 ]; then
-        # 出口服务器规则
-        cat > "$rule_file" <<EOF
-RULE_ID=$rule_id
-RULE_NAME="落地"
-RULE_ROLE="2"
-SECURITY_LEVEL="$SECURITY_LEVEL"
-LISTEN_PORT="$EXIT_LISTEN_PORT"
-FORWARD_TARGET="$FORWARD_TARGET"
-TLS_SERVER_NAME="$TLS_SERVER_NAME"
-TLS_CERT_PATH="$TLS_CERT_PATH"
-TLS_KEY_PATH="$TLS_KEY_PATH"
-WS_PATH="$WS_PATH"
-RULE_NOTE="$RULE_NOTE"
-ENABLED="true"
-CREATED_TIME="$(get_gmt8_time '+%Y-%m-%d %H:%M:%S')"
+        # 出口服务器规则 - 处理多端口
+        # 从FORWARD_TARGET中提取端口信息
+        local forward_port="${FORWARD_TARGET##*:}"
+        local forward_address="${FORWARD_TARGET%:*}"
 
-# 负载均衡配置
-BALANCE_MODE="off"
-TARGET_STATES=""
-WEIGHTS=""
+        # 临时设置FORWARD_TARGET为地址部分，供规则创建使用
+        local temp_forward_target="$FORWARD_TARGET"
+        FORWARD_TARGET="$forward_address"
 
-# 故障转移配置
-FAILOVER_ENABLED="false"
-HEALTH_CHECK_INTERVAL="4"
-FAILURE_THRESHOLD="2"
-SUCCESS_THRESHOLD="2"
-CONNECTION_TIMEOUT="3"
+        create_exit_rules_for_ports "$EXIT_LISTEN_PORT" "$forward_port"
 
-# MPTCP配置
-MPTCP_MODE="off"
-
-# Proxy配置
-PROXY_MODE="off"
-EOF
-
-        echo -e "${GREEN}✓ 转发配置已创建 (ID: $rule_id)${NC}"
-        echo -e "${BLUE}配置详情: $FORWARD_TARGET${NC}"
+        # 恢复FORWARD_TARGET
+        FORWARD_TARGET="$temp_forward_target"
     fi
 
     # 恢复原始变量状态
@@ -3930,19 +4074,30 @@ configure_nat_server() {
     echo ""
 
     # 配置监听端口
+    echo -e "${BLUE}多端口使用,逗号分隔${NC}"
     while true; do
         read -p "请输入本地监听端口 (客户端连接的端口，nat机需使用分配的端口): " NAT_LISTEN_PORT
-        if validate_port "$NAT_LISTEN_PORT"; then
+        if validate_ports "$NAT_LISTEN_PORT"; then
             echo -e "${GREEN}监听端口设置为: $NAT_LISTEN_PORT${NC}"
             break
         else
-            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字${NC}"
+            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字，多端口用逗号分隔${NC}"
         fi
     done
 
-    # 诊断端口占用
-    check_port_usage "$NAT_LISTEN_PORT" "中转服务器监听"
-    local port_status=$?
+    # 检查是否为多端口
+    local is_multi_port=false
+    local port_status=0
+
+    if [[ "$NAT_LISTEN_PORT" == *","* ]]; then
+        is_multi_port=true
+        echo -e "${BLUE}检测到多端口配置，跳过端口占用检测${NC}"
+        port_status=0  # 多端口不检测占用
+    else
+        # 单端口检测
+        check_port_usage "$NAT_LISTEN_PORT" "中转服务器监听"
+        port_status=$?
+    fi
 
     # 如果端口被realm占用，跳过IP地址、协议、传输方式配置
     if [ $port_status -eq 1 ]; then
@@ -4042,20 +4197,32 @@ configure_nat_server() {
     done
 
     while true; do
-        read -p "出口服务器的监听端口: " REMOTE_PORT
-        if validate_port "$REMOTE_PORT"; then
+        read -p "出口服务器的监听端口(多端口使用,逗号分隔): " REMOTE_PORT
+        if validate_ports "$REMOTE_PORT"; then
             break
         else
-            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字${NC}"
+            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字，多端口用逗号分隔${NC}"
         fi
     done
 
     # 测试连通性
-    echo -e "${YELLOW}正在测试与出口服务器的连通性...${NC}"
-    if check_connectivity "$REMOTE_IP" "$REMOTE_PORT"; then
-        echo -e "${GREEN}✓ 连接测试成功！${NC}"
+    local connectivity_ok=true
+
+    # 检查是否为多端口
+    if [[ "$REMOTE_PORT" == *","* ]]; then
+        echo -e "${BLUE}多端口配置，跳过连通性测试${NC}"
     else
-        echo -e "${RED}✗ 连接测试失败，请检查出口服务器是否已启动并确认IP和端口正确${NC}"
+        echo -e "${YELLOW}正在测试与出口服务器的连通性...${NC}"
+        if check_connectivity "$REMOTE_IP" "$REMOTE_PORT"; then
+            echo -e "${GREEN}✓ 连接测试成功！${NC}"
+        else
+            echo -e "${RED}✗ 连接测试失败，请检查出口服务器是否已启动并确认IP和端口正确${NC}"
+            connectivity_ok=false
+        fi
+    fi
+
+    # 处理连接失败的情况
+    if [ "$connectivity_ok" = false ]; then
 
         # 检查是否为域名，给出DDNS特别提醒
         if ! validate_ip "$REMOTE_IP" && [[ "$REMOTE_IP" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
@@ -4262,29 +4429,38 @@ configure_exit_server() {
     echo ""
 
     # 配置监听端口
+    echo -e "${BLUE}多端口使用,逗号分隔${NC}"
     while true; do
         read -p "请输入监听端口 (等待中转服务器连接的端口，NAT VPS需使用商家分配的端口): " EXIT_LISTEN_PORT
-        if validate_port "$EXIT_LISTEN_PORT"; then
+        if validate_ports "$EXIT_LISTEN_PORT"; then
             echo -e "${GREEN}监听端口设置为: $EXIT_LISTEN_PORT${NC}"
             break
         else
-            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字${NC}"
+            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字，多端口用逗号分隔${NC}"
         fi
     done
 
-    # 诊断端口占用
-    check_port_usage "$EXIT_LISTEN_PORT" "出口服务器监听"
+    # 检查是否为多端口
+    local is_multi_port=false
+
+    if [[ "$EXIT_LISTEN_PORT" == *","* ]]; then
+        is_multi_port=true
+        echo -e "${BLUE}检测到多端口配置，跳过端口占用检测${NC}"
+    else
+        # 单端口检测
+        check_port_usage "$EXIT_LISTEN_PORT" "出口服务器监听"
+    fi
 
     echo ""
 
     # 配置转发目标
-    echo "配置转发目标 (就是设置好的本地业务软件,服务等等的信息):"
+    echo "配置本地转发目标 (设置好用于业务的本地软件和服务):"
     echo ""
     echo -e "${YELLOW}双端Realm架构${NC}"
     echo -e "${YELLOW}ipv4输入127.0.0.1,IPv6输入: ::1${NC}"
     echo ""
 
-    # 转发目标地址配置（简化）
+    # 转发目标地址配置
     while true; do
         read -p "转发目标IP地址(默认:127.0.0.1): " input_target
         if [ -z "$input_target" ]; then
@@ -4310,12 +4486,12 @@ configure_exit_server() {
     # 转发目标端口配置
     local forward_port
     while true; do
-        read -p "转发目标端口(业务端口): " forward_port
-        if validate_port "$forward_port"; then
+        read -p "转发本地目标业务端口(多端口使用,逗号分隔): " forward_port
+        if validate_ports "$forward_port"; then
             echo -e "${GREEN}转发端口设置为: $forward_port${NC}"
             break
         else
-            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字${NC}"
+            echo -e "${RED}无效端口号，请输入 1-65535 之间的数字，多端口用逗号分隔${NC}"
         fi
     done
 
@@ -4323,25 +4499,32 @@ configure_exit_server() {
     FORWARD_TARGET="$FORWARD_TARGET:$forward_port"
 
     # 测试转发目标连通性
-    echo -e "${YELLOW}正在测试转发目标连通性...${NC}"
     local connectivity_ok=true
 
-    # 解析并测试每个地址
-    local addresses_part="${FORWARD_TARGET%:*}"
-    local target_port="${FORWARD_TARGET##*:}"
-    IFS=',' read -ra TARGET_ADDRESSES <<< "$addresses_part"
-    for addr in "${TARGET_ADDRESSES[@]}"; do
-        addr=$(echo "$addr" | xargs)  # 去除空格
-        echo -e "${BLUE}测试连接: $addr:$target_port${NC}"
-        if check_connectivity "$addr" "$target_port"; then
-            echo -e "${GREEN}✓ $addr:$target_port 连接成功${NC}"
-        else
-            echo -e "${RED}✗ $addr:$target_port 连接失败${NC}"
-            connectivity_ok=false
-        fi
-    done
+    # 检查是否为多端口，多端口跳过连通性测试
+    if [[ "$forward_port" == *","* ]]; then
+        echo -e "${BLUE}多端口配置，跳过转发目标连通性测试${NC}"
+    else
+        echo -e "${YELLOW}正在测试转发目标连通性...${NC}"
 
-    if ! $connectivity_ok; then
+        # 解析并测试每个地址
+        local addresses_part="${FORWARD_TARGET%:*}"
+        local target_port="${FORWARD_TARGET##*:}"
+        IFS=',' read -ra TARGET_ADDRESSES <<< "$addresses_part"
+        for addr in "${TARGET_ADDRESSES[@]}"; do
+            addr=$(echo "$addr" | xargs)  # 去除空格
+            echo -e "${BLUE}测试连接: $addr:$target_port${NC}"
+            if check_connectivity "$addr" "$target_port"; then
+                echo -e "${GREEN}✓ $addr:$target_port 连接成功${NC}"
+            else
+                echo -e "${RED}✗ $addr:$target_port 连接失败${NC}"
+                connectivity_ok=false
+            fi
+        done
+    fi
+
+    # 只有单端口且连通性测试失败时才处理
+    if ! $connectivity_ok && [[ "$forward_port" != *","* ]]; then
         echo -e "${RED}部分或全部转发目标连接测试失败，请确认代理服务是否正常运行${NC}"
 
         # 检查是否包含域名，给出DDNS特别提醒
@@ -4370,8 +4553,6 @@ configure_exit_server() {
     else
         echo -e "${GREEN}✓ 所有转发目标连接测试成功！${NC}"
     fi
-
-    # 已移除FORWARD_IP兼容性变量，统一使用FORWARD_TARGET
 
     # 传输模式选择
     echo ""
@@ -4908,7 +5089,7 @@ download_with_fallback() {
     fi
 }
 
-# 简洁高效的下载函数
+# 下载函数
 reliable_download() {
     local url="$1"
     local filename="$2"
@@ -5867,14 +6048,14 @@ generate_realm_config() {
     done
 }
 
-# 生成 systemd 服务文件 - 简化（内置日志管理）
+# 生成 systemd 服务文件 - （内置日志管理）
 generate_systemd_service() {
     echo -e "${YELLOW}正在生成 systemd 服务文件...${NC}"
 
     # 内置日志管理：启动前清理过大的日志文件
     manage_log_size "$LOG_PATH" 50 25
 
-    # 直接生成systemd服务文件 - 使用简化的启动参数和日志限制
+    # 直接生成systemd服务文件 - 使用启动参数和日志限制
     cat > "$SYSTEMD_PATH" <<EOF
 [Unit]
 Description=Realm TCP Relay Service
@@ -5916,14 +6097,14 @@ EOF
     echo -e "${GREEN}✓ systemd 服务已重新加载${NC}"
 }
 
-# 简单启动空服务（让脚本能识别已安装状态）
+# 启动空服务（让脚本能识别已安装状态）
 start_empty_service() {
     echo -e "${YELLOW}正在初始化配置以完成安装...${NC}"
 
     # 创建最基本的配置目录
     mkdir -p "$CONFIG_DIR"
 
-    # 创建最简单的空配置文件
+    # 创建最空配置文件
     cat > "$CONFIG_PATH" <<EOF
 {
     "endpoints": []
@@ -6264,7 +6445,7 @@ uninstall_script_files() {
     done
 }
 
-# 通用文件路径清理函数
+# 文件路径清理函数
 cleanup_files_by_paths() {
     for path in "$@"; do
         if [ -f "$path" ]; then
@@ -6275,7 +6456,7 @@ cleanup_files_by_paths() {
     done
 }
 
-# 通用文件模式清理函数
+# 文件模式清理函数
 cleanup_files_by_pattern() {
     local pattern="$1"
     local search_dirs="${2:-/}"
