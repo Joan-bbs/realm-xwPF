@@ -30,13 +30,13 @@
 ### 一键安装
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ### 网络受限使用加速源,一键安装
 
 ```bash
-wget -qO- https://ghfast.top/https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://ghfast.top/https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ## 🧭 无法联网的离线安装
@@ -49,7 +49,7 @@ wget -qO- https://ghfast.top/https://raw.githubusercontent.com/zywe03/realm-xwPF
 **下载必要文件**
 
 在有网络的设备上下载以下文件：
-- **脚本文件下载**：[xwPF.sh](https://github.com/zywe03/realm-xwPF/raw/main/xwPF.sh) (右键点击 → 另存为)
+- **脚本文件下载**：[xwPF.sh](https://github.com/Joan-bbs/realm-xwPF/raw/main/xwPF.sh) (右键点击 → 另存为)
 - **Realm 程序下载**（根据系统架构选择）：
 
 | 架构 | 适用系统 | 下载链接 | 检测命令 |
