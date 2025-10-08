@@ -73,9 +73,9 @@ NC='\033[0m'          # 重置颜色
 # 全局多源下载配置
 DOWNLOAD_SOURCES=(
     ""  # 官方源
-    "https://proxy.vvvv.ee/"
-    "https://ghfast.top/"
-    "https://gh.222322.xyz/"
+    "https://gh-proxy.net/"
+    "https://gitproxy.click/"
+    "https://gh.llkk.cc/"
 )
 
 # 全局超时配置
