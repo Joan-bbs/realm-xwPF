@@ -2327,7 +2327,7 @@ manual_update_script() {
     # 从GitHub下载最新版本
     echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
 
-    local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
+    local script_url="https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/speedtest.sh"
 
     # 使用统一多源下载函数
     if download_from_sources "$script_url" "$current_script"; then
