@@ -36,7 +36,7 @@ wget -qO- https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | s
 ### 网络受限使用加速源,一键安装
 
 ```bash
-wget -qO- https://ghfast.top/https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | sudo bash -s install
+wget -qO- https://proxy.vvvv.ee/https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | sudo bash -s install
 ```
 
 ## 🧭 无法联网的离线安装
