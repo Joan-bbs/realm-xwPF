@@ -217,7 +217,7 @@ manage_dependencies() {
         if [ "$mode" = "check" ]; then
             echo -e "${RED}错误: 缺少必备工具: ${missing_tools[*]}${NC}"
             echo -e "${YELLOW}请先选择菜单选项1进行安装，或手动运行安装命令:${NC}"
-            echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
+            echo -e "${BLUE}curl -fsSL https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
             exit 1
         elif [ "$mode" = "install" ]; then
             echo -e "${YELLOW}需要安装以下工具: ${missing_tools[*]}${NC}"
@@ -6059,7 +6059,7 @@ generate_systemd_service() {
     cat > "$SYSTEMD_PATH" <<EOF
 [Unit]
 Description=Realm TCP Relay Service
-Documentation=https://github.com/zywe03/realm-xwPF
+Documentation=https://github.com/Joan-bbs/realm-xwPF
 After=network.target nss-lookup.target
 Wants=network.target
 
@@ -6136,13 +6136,13 @@ self_install() {
 
         # 自动从GitHub下载最新版本覆盖更新
         echo -e "${BLUE}正在从GitHub下载最新脚本...${NC}"
-        local base_script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh"
+        local base_script_url="https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh"
 
         # 使用统一多源下载函数
         if download_from_sources "$base_script_url" "${install_dir}/${script_name}"; then
             chmod +x "${install_dir}/${script_name}"
         else
-            echo -e "${RED}✗ 脚本更新失败，手动更新wget -qO- https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
+            echo -e "${RED}✗ 脚本更新失败，手动更新wget -qO- https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh | sudo bash -s install${NC}"
             echo -e "${BLUE}使用现有脚本版本${NC}"
         fi
     elif [ -f "$0" ]; then
@@ -6153,7 +6153,7 @@ self_install() {
     else
         # 如果是通过管道运行的，需要重新下载
         echo -e "${BLUE}正在从GitHub下载脚本...${NC}"
-        local base_script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/xwPF.sh"
+        local base_script_url="https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/xwPF.sh"
 
         # 使用统一多源下载函数
         if download_from_sources "$base_script_url" "${install_dir}/${script_name}"; then
@@ -6861,7 +6861,7 @@ get_gmt8_time() {
 
 # 下载中转网络链路测试脚本
 download_speedtest_script() {
-    local script_url="https://raw.githubusercontent.com/zywe03/realm-xwPF/main/speedtest.sh"
+    local script_url="https://raw.githubusercontent.com/Joan-bbs/realm-xwPF/main/speedtest.sh"
     local target_path="/etc/realm/speedtest.sh"
 
     echo -e "${GREEN}正在下载最新版测速脚本...${NC}"
